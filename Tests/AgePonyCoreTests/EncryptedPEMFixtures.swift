@@ -1,0 +1,93 @@
+import Foundation
+
+/// Shared test fixtures for passphrase-protected OpenSSH PEMs.
+/// The passphrase is `"agepony-test-passphrase"`. Each key has two forms: encrypted and unencrypted.
+/// Generated with Python `cryptography` against a freshly created keypair.
+enum EncryptedPEMFixtures {
+    static let passphrase = "agepony-test-passphrase"
+
+    // MARK: RSA fixtures (2048-bit)
+
+    static let rsaEncrypted = """
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBPJD+5HQSb18bs
+VxSoY+3xAAAAEAAAAAEAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDNdEWFkZzWGM9X7Q5vEGxK
+ux9t/xgjcWc+j8xvzYJxHFD3yA7Jy2k57ZBVTPWfh0EikJqK7H5wWpIrtFkJtKN+ueQgI7oJgtQy
+wC2PHo0rBf19KdA2nRq1zEuPvpXKtxvnp7Cifdo22mAwdjor4m8Fz3rh8YZOdlwWRvsowI8SAsln
+o6LN7yPuaRpYfDB17lRSqCg9qzjZWgeyISyf570YEiVNjMw9pIwYloGIl9XdchUqHg4iSoF9EGz4
+yXSoc0caKHZQEHiEE+vf5xTAmPn1Eo0KJBzOU6KsUMZHlvSCkgbz0GGwY4itjuAoj/dee0Cpd8ii
+GwYSyiC7tG+hXKINAAADwA8jPc6MUw5okQSmw1PcSKv1V41pnSTAmmsA8TxDe8yG6An7ErDouwcZ
+0aaC8pro1nYPvL0ICYrWtOujeI3WBesFKRF0Ul5r3HMTCf+/kS4GfYnu8xPtN2mLTpF0JLk5efmN
+OKyY6Nhbm3UgkC85YJvmChgNFJm2PiqyZxHGYTbRwOYkXNu7+cNFt0GZJkIWRhXfQeqpmj8LT6Ux
+2yLvntaVbJgNryQunq2OoQ+ICOcrs3dCcfkgFxDV67s+rDQpRaPkdBytgsGDewDwggri+HgNISwj
+E7VRB8qb4WbM/69gN+YLd6hIhhtT0WPcEfXztTQ0YDSpn0euXHB/1a082+OFekrgbJ/L3D3yd5tW
+VQL09pvgRsK9L4omydIRI1IftXGFNeehZu57eWp0PnRsCYAwcwNsTS47IlFj1BcvjSLcSL4d8WHz
+GWBocKOYDkVlZ9L5ihwEMfHHgIBSkhe7hMEKrY5xNCX8LuP4OyQdJxTHqyqKtWBmOcGexeOZzmxJ
+xlH2nlnhZ9yyRkEwLYqFeicLrHd5mI5dBzu1KgxzeIG6xtMem6hEcMpYK8eAzeziCa555z6O/Jzy
+u7o/V06aJpyx1llSujDzQa3yrw5bLQvXKBWQvdQ8swhVfihQZhzOznromps5UfQubn4X9huOZoF0
+bPrrjPAScBUitMBeSFTNu4tfwi+v9UMMjC5kbWMMMngxj7E39bTBoYUAMaoHyLmwpqZSbmu27gOJ
+FHDXJezwA2t0oDjg7EHnFclsfkLidL89VjhgLqbPWxHflavM9Xymfmj22OtUafwn2OdXlsMfzCvu
+urKPB/btbIOeqkmqCFEYDzFQPx+UTaMODvNJyesGx46Hfsm7nkvU+TewyW6u22qwDFfrZoKK/5lu
+EG0Y68sOhoc5/5u5M6nOHWYXWWmIE6f8M/whUKtVTgoO+leXmHnLPit/mIU4PBGRBdv1wm5TPmbH
+m/wTmpeqFk+dB19n2y/+2H4WMzn3i98ZOrSiQcHhjsf3vTq6NmtOM+oznNqfIWS3awpk0qsjYlaz
+YtJjdzmzNAF58wvJUTl+oh35JwM3tzaEQkyt/Sm6wtuQwGIsdDTfxlW1an7xNtiXQXWO9fih97lU
+VEsdJ+fz+dCR9tdLO0vvREUDjMa9zqDWsTDHj6cKlWdEX/NHE+ytWuGVHCnmT4i6y4/bNHnGJ7Z3
+BzwsjoqVsHKcA8XMbIYOEksOT0cDLK2C5udcjl5zoI3h0W3WeqZqwdT6OmluqUXn8Uh4FiZyg5Ys
+j7blScu4Aw==
+-----END OPENSSH PRIVATE KEY-----
+"""
+
+    static let rsaUnencrypted = """
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcnNhAAAA
+AwEAAQAAAQEAzXRFhZGc1hjPV+0ObxBsSrsfbf8YI3FnPo/Mb82CcRxQ98gOyctpOe2QVUz1n4dB
+IpCaiux+cFqSK7RZCbSjfrnkICO6CYLUMsAtjx6NKwX9fSnQNp0atcxLj76Vyrcb56ewon3aNtpg
+MHY6K+JvBc964fGGTnZcFkb7KMCPEgLJZ6Oize8j7mkaWHwwde5UUqgoPas42VoHsiEsn+e9GBIl
+TYzMPaSMGJaBiJfV3XIVKh4OIkqBfRBs+Ml0qHNHGih2UBB4hBPr3+cUwJj59RKNCiQczlOirFDG
+R5b0gpIG89BhsGOIrY7gKI/3XntAqXfIohsGEsogu7RvoVyiDQAAA7hlynmrZcp5qwAAAAdzc2gt
+cnNhAAABAQDNdEWFkZzWGM9X7Q5vEGxKux9t/xgjcWc+j8xvzYJxHFD3yA7Jy2k57ZBVTPWfh0Ei
+kJqK7H5wWpIrtFkJtKN+ueQgI7oJgtQywC2PHo0rBf19KdA2nRq1zEuPvpXKtxvnp7Cifdo22mAw
+djor4m8Fz3rh8YZOdlwWRvsowI8SAslno6LN7yPuaRpYfDB17lRSqCg9qzjZWgeyISyf570YEiVN
+jMw9pIwYloGIl9XdchUqHg4iSoF9EGz4yXSoc0caKHZQEHiEE+vf5xTAmPn1Eo0KJBzOU6KsUMZH
+lvSCkgbz0GGwY4itjuAoj/dee0Cpd8iiGwYSyiC7tG+hXKINAAAAAwEAAQAAAQAKXAD/ZaKzVufp
+ho3yQrE7KWlByhmE+/xZNrX3szSPEH7yp3c7bJK/NX/QFUPTSeYaYJEyTQ9pCeAR7ROKPj36L1RV
+3IdOYHbjojYJ39/9Wd14uKmDf3Nv1D/BHTp/ULFLAnURFGhy2Jr+BpATU2UGtXn8N4nuneAxzV1v
+phnwrfUMChgjY32JprFtVnevku1RTqcXk3yDf/SNP1i/cLUy0eBTEs1q9SAtzwJWTwzaj7oc0feq
+aQq5zDckqL9S+eNcCDWCNXiv8jtWdLqA2luPN9hd9J4M1wS8Lbqy8Z4LpGqGCe/sZrqa0+lR6CpO
+bxWMxCKu3Fvbek5/Hr9DNw0vAAAAgQC9iPmyFHAdt613GYkdN+N3nG5PMx42WhjKsLCbjVC7x3gB
+C22apux9lJD/ocE0FDhdqLWqfSPuFtRNan4gTxvy3wesfs4xAI2WEJ/zDbcgpF3v8vz4AHN+TVUv
+bLQ6byArBoZ8xhHnCWikK4S54wiAkD5Q36Ac732nCt2Q3tYu6wAAAIEA/aYdVWk4eCEVMfdV/dYN
+J80KlXzgrf5oSpoxZfxiyfVtakk4OwSspa0tK+shyJyqLNGIRPmU1nTsDlt92KwbcXx2qpZxPhCh
+3mpwj43frvFf7uSMkaY021iVx7ZXpdiVJ1uuw1UGfNzb2W5N6PNgwueQnfvSrsJmNAK3KpLHxdMA
+AACBAM9by5/SrCQQPnsu1y0o4HJEAClqLGs/nn419tN5/7C9xYcnkcTz0qpE5O08+xgXGIB0d9g8
+hqIYr74u/IN842jaqH8JOVz4Y/hBl3LBAikToA6cMy48ED9GNvTBBZfGk8W5BTqMlXuPvUeVidDc
+VaQT992HQKeV8h+CjDYRxayfAAAAAAEC
+-----END OPENSSH PRIVATE KEY-----
+"""
+
+    static let rsaPubLine = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDNdEWFkZzWGM9X7Q5vEGxKux9t/xgjcWc+j8xvzYJxHFD3yA7Jy2k57ZBVTPWfh0EikJqK7H5wWpIrtFkJtKN+ueQgI7oJgtQywC2PHo0rBf19KdA2nRq1zEuPvpXKtxvnp7Cifdo22mAwdjor4m8Fz3rh8YZOdlwWRvsowI8SAslno6LN7yPuaRpYfDB17lRSqCg9qzjZWgeyISyf570YEiVNjMw9pIwYloGIl9XdchUqHg4iSoF9EGz4yXSoc0caKHZQEHiEE+vf5xTAmPn1Eo0KJBzOU6KsUMZHlvSCkgbz0GGwY4itjuAoj/dee0Cpd8iiGwYSyiC7tG+hXKIN test-rsa@agepony"
+
+    // MARK: Ed25519 fixtures
+
+    static let edEncrypted = """
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDLQFK8g3W40/py
+E4Ge3lSxAAAAEAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIOnT08tIB413hQ7bpM7kLQpvIGeL
+/IJR2a+Y/Y/v7CHbAAAAkMyh9WitMqb8NKIs29ocCFD344MXdUnY3wwIsDAd/BWi3/fFjzjM5YOn
+4bxR+yhXVqZEazxTsbdTJlODGzQPLFPPMkqf5lwU+TUSJftE8QrACPWG/mwZp+Bbhe243669Owyg
+Thxzs75ciopjNLVBrjkqxh5DabFl4MaL1svYoH5DMYIbArQC1d1JkN/+2nvMhw==
+-----END OPENSSH PRIVATE KEY-----
+"""
+
+    static let edUnencrypted = """
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUx
+OQAAACDp09PLSAeNd4UO26TO5C0KbyBni/yCUdmvmP2P7+wh2wAAAIif4J0pn+CdKQAAAAtzc2gt
+ZWQyNTUxOQAAACDp09PLSAeNd4UO26TO5C0KbyBni/yCUdmvmP2P7+wh2wAAAEAeMcT+mVKUfHCO
+dI5Yv+TeKOnmxxPoDCRgDq+/aZw6hOnT08tIB413hQ7bpM7kLQpvIGeL/IJR2a+Y/Y/v7CHbAAAA
+AAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+"""
+
+    static let edPubLine = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOnT08tIB413hQ7bpM7kLQpvIGeL/IJR2a+Y/Y/v7CHb test-ed25519@agepony"
+}
