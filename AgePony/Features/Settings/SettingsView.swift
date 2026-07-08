@@ -220,6 +220,22 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Link(destination: URL(string: "https://github.com/norsehorse-dev/AgePonyiOS")!) {
+                HStack {
+                    Text("Source code")
+                    Spacer()
+                    Image(systemName: "arrow.up.right.square")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Link(destination: URL(string: "https://apps.apple.com/us/app/pgpony/id6759994432")!) {
+                HStack {
+                    Text("PGPony")
+                    Spacer()
+                    Image(systemName: "arrow.up.right.square")
+                        .foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Text("Made by")
                 Spacer()

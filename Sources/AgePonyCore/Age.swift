@@ -138,4 +138,93 @@ public enum Age {
             throw AgeError.noMatchingIdentity
         }
     }
+
+    // MARK: - Streaming API (bounded memory)
+    //
+    // Mirror of the buffered encrypt/decrypt above for large inputs, e.g. file transfer,
+    // where holding the whole plaintext and the whole ciphertext in memory at once is not
+    // acceptable. The age header is small and stays buffered; only the payload streams,
+    // one 64 KiB chunk at a time. Output bytes are identical in format to the buffered
+    // path, so a streamed file decrypts with the buffered API and vice versa.
+
+    /// Encrypt bytes read from `source` to one or more recipients, writing the age file to
+    /// `sink`. Opens both streams if needed and leaves them open for the caller to close.
+    public static func encryptStream(
+        plaintext source: InputStream,
+        to recipients: [AgeRecipient],
+        into sink: OutputStream
+    ) throws {
+        guard !recipients.isEmpty else { throw AgeError.noRecipients }
+        if recipients.count > 1 {
+            for r in recipients where r is ScryptRecipient {
+                throw AgeError.scryptMustBeSoleRecipient
+            }
+        }
+
+        AgePayload.ensureOpen(source)
+        AgePayload.ensureOpen(sink)
+
+        var fileKeyBytes = [UInt8](repeating: 0, count: fileKeySize)
+        for i in 0..<fileKeySize {
+            fileKeyBytes[i] = UInt8.random(in: 0...UInt8.max)
+        }
+        let fileKey = Data(fileKeyBytes)
+
+        var stanzas: [Stanza] = []
+        stanzas.reserveCapacity(recipients.count)
+        for r in recipients {
+            stanzas.append(try r.wrap(fileKey: fileKey))
+        }
+
+        let headerBytes = AgeHeader.serialize(stanzas: stanzas, fileKey: fileKey)
+        do {
+            try AgePayload.writeAll(headerBytes, to: sink)
+            try AgePayload.encryptStream(source: source, fileKey: fileKey, into: sink)
+        } catch let e as AgePayloadError {
+            throw AgeError.payloadError(e)
+        }
+    }
+
+    /// Decrypt an age file read from `source` using one or more identities, writing the
+    /// plaintext to `sink`. Opens both streams if needed and leaves them open.
+    public static func decryptStream(
+        ciphertext source: InputStream,
+        identities: [AgeIdentity],
+        into sink: OutputStream
+    ) throws {
+        AgePayload.ensureOpen(source)
+        AgePayload.ensureOpen(sink)
+
+        let header: AgeHeader
+        do {
+            header = try AgePayload.readHeader(from: source)
+        } catch let e as AgeHeaderError {
+            throw AgeError.headerError(e)
+        } catch let e as AgePayloadError {
+            throw AgeError.payloadError(e)
+        }
+
+        var fileKey: Data?
+        outer: for id in identities {
+            for stanza in header.stanzas {
+                if let key = try id.unwrap(stanza: stanza), key.count == fileKeySize {
+                    fileKey = key
+                    break outer
+                }
+            }
+        }
+        guard let fileKey else { throw AgeError.noMatchingIdentity }
+
+        do {
+            try header.verifyMAC(fileKey: fileKey)
+        } catch let e as AgeHeaderError {
+            throw AgeError.headerError(e)
+        }
+
+        do {
+            try AgePayload.decryptStream(source: source, fileKey: fileKey, into: sink)
+        } catch let e as AgePayloadError {
+            throw AgeError.payloadError(e)
+        }
+    }
 }
