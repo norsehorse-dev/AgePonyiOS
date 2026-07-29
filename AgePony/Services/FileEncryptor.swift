@@ -61,6 +61,7 @@ public enum FileEncryptor {
         passphrase: String?,
         armor: Bool,
         workFactor: Int = mobileWorkFactor,
+        destinationDirectory: URL? = nil,
         progress: FileProgressHandler? = nil
     ) throws -> URL {
         let usingPassphrase = (passphrase?.isEmpty == false)
@@ -75,7 +76,9 @@ public enum FileEncryptor {
         defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
 
         let total = fileSize(of: inputURL)
-        let outURL = try freshTempURL(named: inputURL.lastPathComponent + ".age")
+        let outName = inputURL.lastPathComponent + ".age"
+        let outURL = try destinationDirectory.map { $0.appendingPathComponent(outName) }
+            ?? freshTempURL(named: outName)
 
         guard let rawInput = InputStream(url: inputURL) else {
             throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)
@@ -167,6 +170,191 @@ public enum FileEncryptor {
 
         try protectFile(at: outURL)
         return outURL
+    }
+
+    // MARK: - Multi-file
+
+    /// One entry per input in a batch encrypt.
+    public struct BatchResult {
+        public let source: URL
+        /// The encrypted file, or nil if this input failed.
+        public let output: URL?
+        public let error: Error?
+
+        public var succeeded: Bool { output != nil }
+    }
+
+    /// Encrypt several inputs as a single tar archive.
+    ///
+    /// The archive is never built anywhere: `TarArchive.source` produces it
+    /// lazily as the encryptor reads, so memory stays flat no matter how many
+    /// files are chosen or how large they are, and no intermediate copy is
+    /// written to disk.
+    public static func encryptArchive(
+        inputURLs: [URL],
+        archiveName: String = "bundle.tar",
+        recipients: [any AgeRecipient],
+        passphrase: String?,
+        armor: Bool,
+        workFactor: Int = mobileWorkFactor,
+        progress: FileProgressHandler? = nil
+    ) throws -> URL {
+        guard !inputURLs.isEmpty else { throw FileEncryptorError.noRecipients }
+
+        let usingPassphrase = (passphrase?.isEmpty == false)
+        if !usingPassphrase && recipients.isEmpty { throw FileEncryptorError.noRecipients }
+        if usingPassphrase && !recipients.isEmpty {
+            throw FileEncryptorError.scryptCannotMixWithRecipients
+        }
+
+        // Hold security-scoped access for every input across the whole read.
+        // Entries are opened lazily, so access has to outlive the call rather
+        // than each individual open.
+        let scopedURLs = inputURLs.filter { $0.startAccessingSecurityScopedResource() }
+        defer { scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() } }
+
+        var entries: [TarArchive.StreamEntry] = []
+        entries.reserveCapacity(inputURLs.count)
+        for url in inputURLs {
+            let size = fileSize(of: url)
+            let name = url.lastPathComponent
+            entries.append(TarArchive.StreamEntry(name: name, size: size) {
+                InputStream(url: url) ?? InputStream(data: Data())
+            })
+        }
+
+        let archiveBytes = TarArchive.sizeOf(entries)
+        let outURL = try freshTempURL(named: archiveName + ".age")
+
+        guard let output = OutputStream(url: outURL, append: false) else {
+            throw FileEncryptorError.cannotOpenOutput(outURL.lastPathComponent)
+        }
+
+        let tar: InputStream
+        do {
+            tar = try TarArchive.source(entries)
+        } catch {
+            throw FileEncryptorError.ageError(String(describing: error))
+        }
+
+        let counted = ProgressInputStream(tar, total: archiveBytes, report: progress)
+        counted.open()
+        output.open()
+        defer { counted.close(); output.close() }
+
+        let targets: [any AgeRecipient] = usingPassphrase
+            ? [ScryptRecipient(passphrase: passphrase ?? "", workFactor: workFactor)]
+            : recipients
+
+        do {
+            if armor {
+                let sink = try AgeArmor.EncodingSink(output)
+                try Age.encryptStream(plaintext: counted, to: targets, into: sink)
+                try sink.finish()
+            } else {
+                try Age.encryptStream(plaintext: counted, to: targets, into: output)
+            }
+        } catch {
+            cleanupTempFile(at: outURL)
+            throw FileEncryptorError.ageError(String(describing: error))
+        }
+
+        try protectFile(at: outURL)
+        return outURL
+    }
+
+    /// Write a tar of `inputURLs` to a temp file, streaming.
+    ///
+    /// `encryptArchive` never materialises the archive, which is what keeps
+    /// memory flat -- but signing needs a concrete file to sign. This produces
+    /// one without buffering it: the cost is temp disk, not memory.
+    public static func buildArchiveFile(
+        inputURLs: [URL],
+        archiveName: String = "bundle.tar"
+    ) throws -> URL {
+        let scopedURLs = inputURLs.filter { $0.startAccessingSecurityScopedResource() }
+        defer { scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() } }
+
+        let outURL = try freshTempURL(named: archiveName)
+        guard let output = OutputStream(url: outURL, append: false) else {
+            throw FileEncryptorError.cannotOpenOutput(archiveName)
+        }
+        output.open()
+        defer { output.close() }
+
+        do {
+            for url in inputURLs {
+                guard let input = InputStream(url: url) else {
+                    throw FileEncryptorError.cannotOpenInput(url.lastPathComponent)
+                }
+                input.open()
+                defer { input.close() }
+                try TarArchive.writeEntry(
+                    to: output,
+                    name: url.lastPathComponent,
+                    size: fileSize(of: url),
+                    from: input
+                )
+            }
+            try TarArchive.finish(to: output)
+        } catch let e as FileEncryptorError {
+            cleanupTempFile(at: outURL)
+            throw e
+        } catch {
+            cleanupTempFile(at: outURL)
+            throw FileEncryptorError.writeFailed(String(describing: error))
+        }
+
+        try protectFile(at: outURL)
+        return outURL
+    }
+
+    /// Encrypt each input separately into one shared directory.
+    ///
+    /// Returns a result per input, in order, rather than throwing: one bad file
+    /// in a batch of twenty should not discard the other nineteen. Callers show
+    /// the per-file outcome.
+    ///
+    /// `fileProgress` reports `(filesCompleted, filesTotal)`.
+    public static func encryptEach(
+        inputURLs: [URL],
+        recipients: [any AgeRecipient],
+        passphrase: String?,
+        armor: Bool,
+        workFactor: Int = mobileWorkFactor,
+        fileProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) throws -> (directory: URL, results: [BatchResult]) {
+        guard !inputURLs.isEmpty else { throw FileEncryptorError.noRecipients }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AgePonyBatch-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw FileEncryptorError.writeFailed(error.localizedDescription)
+        }
+
+        var results: [BatchResult] = []
+        results.reserveCapacity(inputURLs.count)
+
+        for (index, url) in inputURLs.enumerated() {
+            do {
+                let out = try encrypt(
+                    inputURL: url,
+                    recipients: recipients,
+                    passphrase: passphrase,
+                    armor: armor,
+                    workFactor: workFactor,
+                    destinationDirectory: directory
+                )
+                results.append(BatchResult(source: url, output: out, error: nil))
+            } catch {
+                results.append(BatchResult(source: url, output: nil, error: error))
+            }
+            fileProgress?(index + 1, inputURLs.count)
+        }
+
+        return (directory, results)
     }
 
     // MARK: - Decrypt (buffered)
@@ -269,9 +457,20 @@ public enum FileEncryptor {
         return url
     }
 
+    /// Remove the temp directory containing `url`.
+    ///
+    /// Single outputs each get their own directory, so removing the parent is
+    /// correct there. For a batch, whose outputs share one directory, use
+    /// `cleanupTempDirectory` instead -- calling this on one member would take
+    /// its siblings with it.
     public static func cleanupTempFile(at url: URL) {
         let dir = url.deletingLastPathComponent()
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Remove a batch output directory and everything in it.
+    public static func cleanupTempDirectory(at directory: URL) {
+        try? FileManager.default.removeItem(at: directory)
     }
 }
 

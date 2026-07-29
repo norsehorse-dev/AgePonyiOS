@@ -22,8 +22,14 @@ struct EncryptFlow: View {
     let preloadedURL: URL?
 
     @State private var stage: Stage = .pickFile
-    @State private var sourceURL: URL?
+    /// Everything the user picked: one file, or several.
+    @State private var inputs: [URL] = []
     @State private var sourceSize: Int = 0
+    /// Only meaningful when `inputs` holds more than one file.
+    @State private var multiMode: MultiMode = .archive
+    /// Set when a separate-files batch has run.
+    @State private var batchDirectory: URL?
+    @State private var batchResults: [FileEncryptor.BatchResult] = []
     @State private var recipients: [any AgeRecipient] = []
     @State private var passphrase: String?
     @State private var armor: Bool = true
@@ -43,9 +49,18 @@ struct EncryptFlow: View {
 
     enum Stage {
         case pickFile
+        /// Shown only for multiple files: one archive, or one each.
+        case chooseMode
         case configure
         case encrypting
         case done
+    }
+
+    enum MultiMode: Hashable {
+        /// Bundle everything into a single .tar.age.
+        case archive
+        /// Produce one .age per input.
+        case separate
     }
 
     init(vault: Vault, preloadedURL: URL? = nil) {
@@ -63,7 +78,7 @@ struct EncryptFlow: View {
                 }
             }
             .task {
-                if let url = preloadedURL, sourceURL == nil {
+                if let url = preloadedURL, inputs.isEmpty {
                     preloadFile(url)
                 }
             }
@@ -133,6 +148,8 @@ struct EncryptFlow: View {
         switch stage {
         case .pickFile:
             pickFileStage
+        case .chooseMode:
+            chooseModeStage
         case .configure:
             configureStage
         case .encrypting:
@@ -163,15 +180,84 @@ struct EncryptFlow: View {
         }
     }
 
+    private var chooseModeStage: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                Text("\(inputs.count) files selected")
+                    .font(AgePonyTypography.title)
+                Text(ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file)
+                     + " in total")
+                    .font(AgePonyTypography.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 32)
+            .padding(.bottom, 24)
+
+            VStack(spacing: 12) {
+                modeOption(
+                    .archive,
+                    icon: "shippingbox",
+                    title: "One archive",
+                    detail: "Bundle everything into a single bundle.tar.age. The recipient unpacks it after decrypting."
+                )
+                modeOption(
+                    .separate,
+                    icon: "doc.on.doc",
+                    title: "One file each",
+                    detail: "Encrypt every file on its own, producing \(inputs.count) .age files you can share individually."
+                )
+            }
+            .padding(.horizontal, 20)
+
+            Spacer()
+
+            Button("Continue") { stage = .configure }
+                .buttonStyle(.agePonyPrimary)
+                .padding(.horizontal, 32)
+                .padding(.bottom, 40)
+        }
+    }
+
+    private func modeOption(_ mode: MultiMode, icon: String, title: String, detail: String) -> some View {
+        Button {
+            multiMode = mode
+        } label: {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: icon)
+                    .font(.system(size: 22))
+                    .foregroundStyle(multiMode == mode ? AgePonyColors.tealCore : .secondary)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(AgePonyTypography.bodyEmph)
+                        .foregroundStyle(.primary)
+                    Text(detail)
+                        .font(AgePonyTypography.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: multiMode == mode ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(multiMode == mode ? AgePonyColors.tealCore : .secondary)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.secondary.opacity(multiMode == mode ? 0.14 : 0.06))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var configureStage: some View {
         Form {
             Section {
-                if let url = sourceURL {
+                if !inputs.isEmpty {
                     HStack {
-                        Image(systemName: "doc")
+                        Image(systemName: inputs.count == 1 ? "doc" : "doc.on.doc")
                             .foregroundStyle(AgePonyColors.tealCore)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(url.lastPathComponent)
+                            Text(sourceTitle)
                                 .font(AgePonyTypography.bodyEmph)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -224,8 +310,13 @@ struct EncryptFlow: View {
 
             Section {
                 Toggle("Also sign this file", isOn: $signEnabled)
-                    .disabled(signingIdentities.isEmpty)
-                if signEnabled, !signingIdentities.isEmpty {
+                    .disabled(signingIdentities.isEmpty || !signingAvailable)
+                if !signingAvailable {
+                    Text("A signature covers one file. Choose \"One archive\" to sign the bundle.")
+                        .font(AgePonyTypography.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if signEnabled, signingAvailable, !signingIdentities.isEmpty {
                     Picker("Sign with", selection: $signingIdentityID) {
                         ForEach(signingIdentities) { identity in
                             Text(identity.name).tag(Optional(identity.id))
@@ -284,8 +375,11 @@ struct EncryptFlow: View {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 56, weight: .regular))
                 .foregroundStyle(AgePonyColors.tealCore)
-            Text("Encrypted")
+            Text(batchResults.isEmpty ? "Encrypted" : batchHeadline)
                 .font(AgePonyTypography.title)
+            if !batchResults.isEmpty {
+                batchResultList
+            }
             if let url = resultURL {
                 Text(url.lastPathComponent)
                     .font(AgePonyTypography.monoCaption)
@@ -312,6 +406,15 @@ struct EncryptFlow: View {
                 if let url = resultURL, signatureURL == nil {
                     ShareLink(item: url) {
                         Text("Share encrypted file")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.agePonyPrimary)
+                }
+                if !batchSuccessURLs.isEmpty {
+                    ShareLink(items: batchSuccessURLs) {
+                        Text(batchSuccessURLs.count == 1
+                             ? "Share encrypted file"
+                             : "Share \(batchSuccessURLs.count) encrypted files")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.agePonyPrimary)
@@ -347,8 +450,62 @@ struct EncryptFlow: View {
         return [active.id]
     }
 
+    private var batchHeadline: String {
+        let ok = batchResults.filter(\.succeeded).count
+        if ok == batchResults.count { return "Encrypted \(ok) files" }
+        return "Encrypted \(ok) of \(batchResults.count)"
+    }
+
+    private var batchSuccessURLs: [URL] {
+        batchResults.compactMap(\.output)
+    }
+
+    /// Per-file outcome. A batch reports every file rather than failing whole,
+    /// so a single unreadable input does not discard the rest.
+    private var batchResultList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(batchResults, id: \.source) { result in
+                    HStack(spacing: 8) {
+                        Image(systemName: result.succeeded
+                              ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(result.succeeded ? AgePonyColors.tealCore : .orange)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(result.source.lastPathComponent)
+                                .font(AgePonyTypography.monoCaption)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if let error = result.error {
+                                Text(describe(error))
+                                    .font(AgePonyTypography.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+        .frame(maxHeight: 220)
+    }
+
     private var canEncrypt: Bool {
-        sourceURL != nil && (!recipients.isEmpty || passphrase?.isEmpty == false)
+        !inputs.isEmpty && (!recipients.isEmpty || passphrase?.isEmpty == false)
+    }
+
+    private var sourceTitle: String {
+        if inputs.count == 1 { return inputs[0].lastPathComponent }
+        return multiMode == .archive
+            ? "\(inputs.count) files → bundle.tar.age"
+            : "\(inputs.count) files, encrypted separately"
+    }
+
+    /// Signing produces one detached signature over one file, so it only makes
+    /// sense when the run yields a single output.
+    private var signingAvailable: Bool {
+        inputs.count == 1 || multiMode == .archive
     }
 
     private var recipientSummaryTitle: String {
@@ -381,8 +538,15 @@ struct EncryptFlow: View {
         } else {
             sourceSize = 0
         }
-        sourceURL = url
+        inputs = [url]
         stage = .configure
+    }
+
+    private static func byteSize(of url: URL) -> Int {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs?[.size] as? NSNumber)?.intValue ?? 0
     }
 
     private func handleFilePick(_ result: Result<[URL], Error>) {
@@ -392,7 +556,12 @@ struct EncryptFlow: View {
             if urls.count == 1 {
                 preloadFile(urls[0])
             } else {
-                bundleAndPreload(urls)
+                // Ask rather than assume. Bundling everything was the old
+                // behaviour and it is not always what the user wants.
+                inputs = urls
+                sourceSize = urls.reduce(0) { $0 + Self.byteSize(of: $1) }
+                multiMode = .archive
+                stage = .chooseMode
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -403,28 +572,6 @@ struct EncryptFlow: View {
     /// tar (`bundle.tar`) and feed that through the normal encrypt pipeline, so
     /// the result is one `bundle.tar.age`. Decrypting and running `tar -xf` (or
     /// any unarchiver) recovers the individual files.
-    private func bundleAndPreload(_ urls: [URL]) {
-        do {
-            var entries: [TarArchive.Entry] = []
-            for url in urls {
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                let data = try Data(contentsOf: url)
-                entries.append(TarArchive.Entry(name: url.lastPathComponent, data: data))
-            }
-            let tar = try TarArchive.create(entries)
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("AgePonyBundle-\(UUID().uuidString.prefix(8))", isDirectory: true)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let bundleURL = dir.appendingPathComponent("bundle.tar")
-            try tar.write(to: bundleURL, options: [.atomic])
-            sourceURL = bundleURL
-            sourceSize = tar.count
-            stage = .configure
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
 
     /// Synchronous-entry version of runEncrypt. The actual encrypt
     /// (potentially scrypt-bound) runs on a background queue so the main
@@ -434,32 +581,67 @@ struct EncryptFlow: View {
             runSignedEncrypt()
             return
         }
-        guard let url = sourceURL else { return }
+        guard !inputs.isEmpty else { return }
         stage = .encrypting
         working = true
         progressFraction = nil
 
+        let inputsSnapshot = inputs
+        let modeSnapshot = multiMode
         let recipientsSnapshot = recipients
         let passphraseSnapshot = passphrase
         let armorSnapshot = armor
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let outURL = try FileEncryptor.encrypt(
-                    inputURL: url,
-                    recipients: recipientsSnapshot,
-                    passphrase: passphraseSnapshot,
-                    armor: armorSnapshot,
-                    progress: { done, total in
-                        guard total > 0 else { return }
-                        let fraction = Double(done) / Double(total)
-                        DispatchQueue.main.async { progressFraction = fraction }
+                let onProgress: FileProgressHandler = { done, total in
+                    guard total > 0 else { return }
+                    let fraction = Double(done) / Double(total)
+                    DispatchQueue.main.async { progressFraction = fraction }
+                }
+
+                if inputsSnapshot.count > 1 && modeSnapshot == .separate {
+                    let batch = try FileEncryptor.encryptEach(
+                        inputURLs: inputsSnapshot,
+                        recipients: recipientsSnapshot,
+                        passphrase: passphraseSnapshot,
+                        armor: armorSnapshot,
+                        fileProgress: { done, total in
+                            guard total > 0 else { return }
+                            let fraction = Double(done) / Double(total)
+                            DispatchQueue.main.async { progressFraction = fraction }
+                        }
+                    )
+                    DispatchQueue.main.async {
+                        batchDirectory = batch.directory
+                        batchResults = batch.results
+                        stage = .done
+                        working = false
                     }
-                )
-                DispatchQueue.main.async {
-                    resultURL = outURL
-                    stage = .done
-                    working = false
+                } else {
+                    let outURL: URL
+                    if inputsSnapshot.count > 1 {
+                        outURL = try FileEncryptor.encryptArchive(
+                            inputURLs: inputsSnapshot,
+                            recipients: recipientsSnapshot,
+                            passphrase: passphraseSnapshot,
+                            armor: armorSnapshot,
+                            progress: onProgress
+                        )
+                    } else {
+                        outURL = try FileEncryptor.encrypt(
+                            inputURL: inputsSnapshot[0],
+                            recipients: recipientsSnapshot,
+                            passphrase: passphraseSnapshot,
+                            armor: armorSnapshot,
+                            progress: onProgress
+                        )
+                    }
+                    DispatchQueue.main.async {
+                        resultURL = outURL
+                        stage = .done
+                        working = false
+                    }
                 }
             } catch {
                 let description = describe(error)
@@ -473,7 +655,7 @@ struct EncryptFlow: View {
     }
 
     private func runSignedEncrypt() {
-        guard let url = sourceURL,
+        guard let url = signableInput(),
               let id = signingIdentityID,
               let identity = signingIdentities.first(where: { $0.id == id }) else { return }
 
@@ -490,6 +672,23 @@ struct EncryptFlow: View {
             }
         } else {
             performSignedEncrypt(url: url, identity: identity)
+        }
+    }
+
+    /// The single file a signature would cover.
+    ///
+    /// One input signs itself. Several inputs in archive mode need the tar to
+    /// exist, so it is streamed to a temp file here -- bounded memory, costing
+    /// only disk. Separate-files mode has no single output and is gated out of
+    /// signing before this is reached.
+    private func signableInput() -> URL? {
+        if inputs.count == 1 { return inputs[0] }
+        guard multiMode == .archive, !inputs.isEmpty else { return nil }
+        do {
+            return try FileEncryptor.buildArchiveFile(inputURLs: inputs)
+        } catch {
+            errorMessage = describe(error)
+            return nil
         }
     }
 
@@ -529,16 +728,28 @@ struct EncryptFlow: View {
     }
 
     private func resetForAnother() {
-        if let url = resultURL { FileEncryptor.cleanupTempFile(at: url) }
+        cleanupOutputs()
         resultURL = nil
         signatureURL = nil
-        sourceURL = nil
+        inputs = []
         sourceSize = 0
+        multiMode = .archive
         stage = .pickFile
     }
 
-    private func cleanupAndDismiss() {
+    /// Batch outputs share one directory, so they are removed as a directory.
+    /// Calling cleanupTempFile on one of them would delete its siblings.
+    private func cleanupOutputs() {
+        if let dir = batchDirectory {
+            FileEncryptor.cleanupTempDirectory(at: dir)
+            batchDirectory = nil
+            batchResults = []
+        }
         if let url = resultURL { FileEncryptor.cleanupTempFile(at: url) }
+    }
+
+    private func cleanupAndDismiss() {
+        cleanupOutputs()
         dismiss()
     }
 
