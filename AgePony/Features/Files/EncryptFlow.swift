@@ -535,6 +535,8 @@ struct EncryptFlow: View {
             case .readFailed(let m):           return "Couldn't read input: \(m)"
             case .writeFailed(let m):          return "Couldn't write output: \(m)"
             case .ageError(let m):             return "Encrypt failed: \(m)"
+            case .cannotOpenInput(let name):   return "Couldn't open \(name) for reading."
+            case .cannotOpenOutput(let name):  return "Couldn't create \(name)."
             }
         }
         if let e = error as? FileSignerError {

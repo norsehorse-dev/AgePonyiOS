@@ -33,16 +33,59 @@ public extension AgeArmor {
     /// The BEGIN marker is written when the sink is created; `finish()` emits the
     /// trailing short group and the END marker. `finish()` deliberately leaves the
     /// wrapped stream open, so a caller can keep owning it.
-    final class EncodingSink {
+    final class EncodingSink: OutputStream {
         private let out: OutputStream
         private var group = Data()
         private var finished = false
+        private var status: Stream.Status = .notOpen
+        private var thrown: Error?
+        private weak var streamDelegate: StreamDelegate?
 
         public init(_ out: OutputStream) throws {
             self.out = out
+            super.init(toMemory: ())
             AgePayload.ensureOpen(out)
             try AgePayload.writeAll(Data((AgeArmor.beginMarker + "\n").utf8), to: out)
+            status = .open
         }
+
+        // MARK: OutputStream conformance
+        //
+        // Being a real OutputStream is the point: it lets Age.encryptStream write
+        // ciphertext straight through the armor encoder in one pass, instead of
+        // encrypting to a temp file and armoring it afterwards.
+
+        public override func open() { if status == .notOpen { status = .open } }
+
+        /// Marks the stream closed. Deliberately does *not* emit the END marker --
+        /// see `finish()`.
+        public override func close() { status = .closed }
+
+        public override var streamStatus: Stream.Status { status }
+        public override var streamError: Error? { thrown }
+        public override var hasSpaceAvailable: Bool { !finished }
+        public override var delegate: StreamDelegate? {
+            get { streamDelegate }
+            set { streamDelegate = newValue }
+        }
+        public override func schedule(in aRunLoop: RunLoop, forMode mode: RunLoop.Mode) {}
+        public override func remove(from aRunLoop: RunLoop, forMode mode: RunLoop.Mode) {}
+        public override func property(forKey key: Stream.PropertyKey) -> Any? { nil }
+        public override func setProperty(_ property: Any?, forKey key: Stream.PropertyKey) -> Bool { false }
+
+        public override func write(_ buffer: UnsafePointer<UInt8>, maxLength len: Int) -> Int {
+            if len == 0 { return 0 }
+            do {
+                try write(Data(bytes: buffer, count: len))
+                return len
+            } catch {
+                thrown = error
+                status = .error
+                return -1
+            }
+        }
+
+        // MARK: Encoding
 
         /// Append `data` to the armored output.
         public func write(_ data: Data) throws {
@@ -74,6 +117,10 @@ public extension AgeArmor {
         }
 
         /// Emit the final partial group and the END marker. Idempotent.
+        ///
+        /// Must be called explicitly; `close()` will not do it for you, so that a
+        /// missed call produces an obviously unterminated file rather than a quietly
+        /// truncated one.
         public func finish() throws {
             if finished { return }
             finished = true
