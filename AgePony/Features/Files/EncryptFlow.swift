@@ -28,6 +28,8 @@ struct EncryptFlow: View {
     @State private var passphrase: String?
     @State private var armor: Bool = true
     @State private var working: Bool = false
+    /// Fraction of the input consumed, or nil before the first report.
+    @State private var progressFraction: Double?
     @State private var errorMessage: String?
     @State private var resultURL: URL?
     @State private var signEnabled: Bool = false
@@ -252,9 +254,23 @@ struct EncryptFlow: View {
     private var encryptingStage: some View {
         VStack(spacing: 18) {
             Spacer()
-            ProgressView()
-                .controlSize(.large)
-                .tint(AgePonyColors.tealCore)
+            if let progressFraction {
+                ProgressView(value: progressFraction)
+                    .progressViewStyle(.linear)
+                    .tint(AgePonyColors.tealCore)
+                    .padding(.horizontal, 48)
+                Text("\(Int(progressFraction * 100))%")
+                    .font(AgePonyTypography.monoCaption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            } else {
+                // No determinate progress yet: a passphrase encrypt sits here for
+                // a second or two while scrypt runs before any bytes are read, and
+                // the sign-then-encrypt path does not report progress yet.
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(AgePonyColors.tealCore)
+            }
             Text("Encrypting…")
                 .font(AgePonyTypography.headline)
                 .foregroundStyle(.secondary)
@@ -421,6 +437,7 @@ struct EncryptFlow: View {
         guard let url = sourceURL else { return }
         stage = .encrypting
         working = true
+        progressFraction = nil
 
         let recipientsSnapshot = recipients
         let passphraseSnapshot = passphrase
@@ -432,7 +449,12 @@ struct EncryptFlow: View {
                     inputURL: url,
                     recipients: recipientsSnapshot,
                     passphrase: passphraseSnapshot,
-                    armor: armorSnapshot
+                    armor: armorSnapshot,
+                    progress: { done, total in
+                        guard total > 0 else { return }
+                        let fraction = Double(done) / Double(total)
+                        DispatchQueue.main.async { progressFraction = fraction }
+                    }
                 )
                 DispatchQueue.main.async {
                     resultURL = outURL
@@ -474,6 +496,7 @@ struct EncryptFlow: View {
     private func performSignedEncrypt(url: URL, identity: StoredIdentity) {
         stage = .encrypting
         working = true
+        progressFraction = nil
 
         let recipientsSnapshot = recipients
         let passphraseSnapshot = passphrase

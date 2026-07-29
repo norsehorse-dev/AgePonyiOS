@@ -26,12 +26,18 @@ struct HomeView: View {
 
     @Environment(\.requestReview) private var requestReview
 
-    @State private var selectedTab: Tab = .files
+    /// Owned by RootView, not by this view.
+    ///
+    /// RootView swaps HomeView out for LockedView when the vault re-locks on
+    /// background, which destroys this view's state. Holding the selection here
+    /// meant every unlock dropped the user back on Files regardless of where
+    /// they had been.
+    @Binding var selectedTab: Tab
     @State private var pendingFileURL: URL?
     @State private var sharePayload: SharedPayload?
     @State private var showWalkthrough: Bool = false
 
-    enum Tab: Hashable {
+    enum Tab: String, Hashable {
         case files, notes, text, identities, settings
     }
 

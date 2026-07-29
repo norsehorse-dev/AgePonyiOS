@@ -24,6 +24,12 @@ struct RootView: View {
     @State private var lockError: String?
     @State private var vaultMissing: Bool = false
     @State private var lastBackgrounded: Date?
+    /// Which tab HomeView is showing.
+    ///
+    /// Held here rather than in HomeView because HomeView is torn down and
+    /// rebuilt every time the vault locks and unlocks; state that lives there
+    /// does not survive a re-lock.
+    @State private var selectedTab: HomeView.Tab = .files
     @State private var resetError: String?
 
     @Environment(\.scenePhase) private var scenePhase
@@ -55,7 +61,7 @@ struct RootView: View {
                     onReset: performReset
                 )
             case .unlocked:
-                HomeView(vault: vault)
+                HomeView(vault: vault, selectedTab: $selectedTab)
             }
         }
         .environment(vault)
@@ -123,6 +129,7 @@ struct RootView: View {
             // Re-create the @State vault so the in-memory model is a clean
             // slate (the existing `vault` is still bound to the old state).
             vault = Vault()
+            selectedTab = .files
             vaultMissing = false
             lockError = nil
             phase = .fresh
