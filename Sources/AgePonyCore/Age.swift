@@ -15,6 +15,20 @@ public protocol AgeRecipient {
     func wrap(fileKey: Data) throws -> Stanza
 }
 
+/// A recipient carrying labels that constrain which other recipients it may share
+/// a file with.
+///
+/// Per age's labels mechanism, every recipient in a file must agree on the exact
+/// same label set, or encryption is refused. This is how a post-quantum recipient
+/// (label `postquantum`) declines to be mixed with a classical one that would
+/// defeat its quantum resistance — the weakest recipient sets the bar for the file.
+///
+/// A recipient that does not conform is treated as having an empty label set, so
+/// mixing a labeled recipient with an unlabeled one is rejected.
+public protocol LabeledAgeRecipient: AgeRecipient {
+    var labels: Set<String> { get }
+}
+
 /// Something that can attempt to decrypt: returns the file key on match, nil if
 /// the stanza wasn't meant for this identity. May throw on malformed input.
 public protocol AgeIdentity {
@@ -26,6 +40,7 @@ public protocol AgeIdentity {
 public enum AgeError: Error, Equatable {
     case noRecipients
     case scryptMustBeSoleRecipient
+    case mismatchedRecipientLabels
     case noMatchingIdentity
     case wrongPassphrase
     case truncatedFile
@@ -44,12 +59,7 @@ public enum Age {
     /// Recipients may be a mix of X25519 / SSH types; scrypt recipients MUST
     /// appear alone (mixing scrypt with any other recipient is a spec violation).
     public static func encrypt(plaintext: Data, to recipients: [AgeRecipient]) throws -> Data {
-        guard !recipients.isEmpty else { throw AgeError.noRecipients }
-        if recipients.count > 1 {
-            for r in recipients where r is ScryptRecipient {
-                throw AgeError.scryptMustBeSoleRecipient
-            }
-        }
+        try validateRecipients(recipients)
 
         // 16 random bytes for the file key.
         var fileKeyBytes = [UInt8](repeating: 0, count: fileKeySize)
@@ -139,6 +149,90 @@ public enum Age {
         }
     }
 
+    /// Shared precondition check for both the buffered and streaming encrypt paths.
+    ///
+    /// Enforces two rules: scrypt must be the only recipient, and every recipient
+    /// must agree on the same label set.
+    static func validateRecipients(_ recipients: [AgeRecipient]) throws {
+        guard !recipients.isEmpty else { throw AgeError.noRecipients }
+
+        if recipients.count > 1 {
+            for r in recipients where r is ScryptRecipient {
+                throw AgeError.scryptMustBeSoleRecipient
+            }
+        }
+
+        // Labels: all recipients must declare an identical set. An unlabeled
+        // recipient declares the empty set, so mixing labeled with unlabeled fails.
+        let labelSets = recipients.map { ($0 as? LabeledAgeRecipient)?.labels ?? [] }
+        if let first = labelSets.first, labelSets.contains(where: { $0 != first }) {
+            throw AgeError.mismatchedRecipientLabels
+        }
+    }
+
+    // MARK: - Header-only probe
+    //
+    // Reading just the header answers "what is this file encrypted to, and can I open
+    // it?" without decrypting anything. The header is bounded and sits at the front, so
+    // this is instant on a file of any size — which is the point: a 1 GB file should not
+    // have to be read to tell the user which key it needs.
+    //
+    // Recipient stanzas are public information. Anyone holding the file already has
+    // them, so surfacing them reveals nothing the holder did not have.
+
+    /// Parse just the header of `ciphertext`, leaving the stream positioned at the first
+    /// payload byte. Throws the usual header errors for input that is not an age file.
+    public static func parseHeaderStream(ciphertext source: InputStream) throws -> AgeHeader {
+        AgePayload.ensureOpen(source)
+        do {
+            return try AgePayload.readHeader(from: source)
+        } catch let e as AgeHeaderError {
+            throw AgeError.headerError(e)
+        } catch let e as AgePayloadError {
+            throw AgeError.payloadError(e)
+        }
+    }
+
+    /// Parse just the header of a buffered age file.
+    public static func parseHeader(ciphertext: Data) throws -> AgeHeader {
+        do {
+            let (header, _) = try AgeHeader.parse(bytes: ciphertext)
+            return header
+        } catch let e as AgeHeaderError {
+            throw AgeError.headerError(e)
+        }
+    }
+
+    /// True if any of `identities` can unwrap this file's header.
+    ///
+    /// Reads the header and stops, leaving `source` positioned at the first payload byte,
+    /// so a caller can find out which key a file needs without decrypting it.
+    public static func canDecryptStream(
+        ciphertext source: InputStream,
+        identities: [AgeIdentity]
+    ) throws -> Bool {
+        guard !identities.isEmpty else { return false }
+        let header = try parseHeaderStream(ciphertext: source)
+        for stanza in header.stanzas {
+            for id in identities where try id.unwrap(stanza: stanza) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True if any of `identities` can unwrap this buffered file's header.
+    public static func canDecrypt(ciphertext: Data, identities: [AgeIdentity]) throws -> Bool {
+        guard !identities.isEmpty else { return false }
+        let header = try parseHeader(ciphertext: ciphertext)
+        for stanza in header.stanzas {
+            for id in identities where try id.unwrap(stanza: stanza) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Streaming API (bounded memory)
     //
     // Mirror of the buffered encrypt/decrypt above for large inputs, e.g. file transfer,
@@ -154,12 +248,7 @@ public enum Age {
         to recipients: [AgeRecipient],
         into sink: OutputStream
     ) throws {
-        guard !recipients.isEmpty else { throw AgeError.noRecipients }
-        if recipients.count > 1 {
-            for r in recipients where r is ScryptRecipient {
-                throw AgeError.scryptMustBeSoleRecipient
-            }
-        }
+        try validateRecipients(recipients)
 
         AgePayload.ensureOpen(source)
         AgePayload.ensureOpen(sink)

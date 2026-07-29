@@ -83,7 +83,6 @@ final class Bech32Tests: XCTestCase {
         let invalid = [
             " 1nwldj5",                                         // HRP char < 33
             "abc1\u{007F}",                                     // body char out of charset
-            "an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx",
             "pzry9x0s0muk",                                     // no separator
             "1pzry9x0s0muk",                                    // empty HRP
             "x1b4n0q5v",                                        // invalid character in body
@@ -94,6 +93,30 @@ final class Bech32Tests: XCTestCase {
         ]
         for s in invalid {
             XCTAssertThrowsError(try Bech32.decode(s), "should reject: \(s)")
+        }
+    }
+
+    /// BIP-0173 lists this vector as invalid, and AgePony deliberately accepts it.
+    ///
+    /// It is well-formed in every other respect — legal HRP characters, valid
+    /// checksum — and is rejected by the spec purely because the whole string is
+    /// 91 characters, one past BIP-0173's 90-character cap. age applies no such
+    /// cap: a post-quantum `age1pq1...` recipient encodes 1216 bytes and runs to
+    /// 1959 characters, so honouring the cap would make post-quantum recipients
+    /// undecodable. `Bech32.maxLength` is a sanity bound on pathological input,
+    /// not a spec limit. The Android implementation makes the same choice.
+    func testAcceptsStringsPastTheBIP0173LengthCap() {
+        let past90 = "an84characterslonghumanreadablepartthatcontainsthenumber1"
+            + "andtheexcludedcharactersbio1569pvx"
+        XCTAssertEqual(past90.count, 91)
+        XCTAssertNoThrow(try Bech32.decode(past90))
+    }
+
+    /// The sanity bound is still enforced.
+    func testRejectsStringsPastTheSanityCap() {
+        let absurd = "age1" + String(repeating: "q", count: Bech32.maxLength)
+        XCTAssertThrowsError(try Bech32.decode(absurd)) { error in
+            XCTAssertEqual(error as? Bech32Error, .stringTooLong)
         }
     }
 

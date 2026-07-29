@@ -43,6 +43,9 @@ public enum Bech32 {
         return map
     }()
 
+    /// Generous sanity cap on encoded length. Not a spec limit — see `decode`.
+    public static let maxLength = 8192
+
     private static let generator: [UInt32] = [
         0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3
     ]
@@ -113,8 +116,11 @@ public enum Bech32 {
     /// Decode a Bech32 string into its HRP and 5-bit data values.
     public static func decode(_ string: String) throws -> (hrp: String, data: [UInt8]) {
         guard string.count >= 8 else { throw Bech32Error.stringTooShort }
-        // BIP-0173 mandates a maximum string length of 90.
-        guard string.count <= 90 else { throw Bech32Error.stringTooLong }
+        // BIP-0173 mandates a maximum string length of 90, but age applies no such
+        // limit: a post-quantum `age1pq1...` recipient encodes 1216 bytes and runs
+        // to ~1959 characters. We keep a generous sanity cap only to bound
+        // pathological input. This matches the Android implementation.
+        guard string.count <= maxLength else { throw Bech32Error.stringTooLong }
         let lower = string.lowercased()
         let upper = string.uppercased()
         guard string == lower || string == upper else {
@@ -231,6 +237,38 @@ public extension Bech32 {
         // decode() normalizes to lowercase HRP, so we compare lowercase.
         let (hrp, bytes) = try decodeBytes(string)
         guard hrp == "age-secret-key-" else { throw Bech32Error.emptyHRP }
+        guard bytes.count == 32 else { throw Bech32Error.invalidPadding }
+        return bytes
+    }
+
+    // MARK: Post-quantum (MLKEM768-X25519)
+    //
+    // The HRP `age1pq` itself contains a '1'. That is safe: the Bech32 charset
+    // excludes '1' entirely, so the separator is unambiguously the *last* '1' in
+    // the string, which is what `decode` looks for.
+
+    /// Encode a 1216-byte hybrid public key as an `age1pq1...` string.
+    static func encodePostQuantumRecipient(_ publicKey: [UInt8]) -> String {
+        encodeBytes(hrp: "age1pq", bytes: publicKey)
+    }
+
+    /// Encode a 32-byte post-quantum identity seed as `AGE-SECRET-KEY-PQ-1...`.
+    static func encodePostQuantumIdentity(_ seed: [UInt8]) -> String {
+        encodeBytes(hrp: "AGE-SECRET-KEY-PQ-", bytes: seed)
+    }
+
+    /// Decode an `age1pq1...` string into the raw 1216-byte hybrid public key.
+    static func decodePostQuantumRecipient(_ string: String) throws -> [UInt8] {
+        let (hrp, bytes) = try decodeBytes(string)
+        guard hrp == "age1pq" else { throw Bech32Error.emptyHRP }
+        guard bytes.count == 1216 else { throw Bech32Error.invalidPadding }
+        return bytes
+    }
+
+    /// Decode an `AGE-SECRET-KEY-PQ-1...` string into the raw 32-byte identity seed.
+    static func decodePostQuantumIdentity(_ string: String) throws -> [UInt8] {
+        let (hrp, bytes) = try decodeBytes(string)
+        guard hrp == "age-secret-key-pq-" else { throw Bech32Error.emptyHRP }
         guard bytes.count == 32 else { throw Bech32Error.invalidPadding }
         return bytes
     }

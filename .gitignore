@@ -1,0 +1,14 @@
+# Xcode / SwiftPM build products
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+
+# Per-user Xcode state, not project configuration
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Scratch space; never publish
+_to_delete/

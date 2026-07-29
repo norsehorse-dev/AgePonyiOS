@@ -26,6 +26,17 @@ public enum TarArchiveError: Error, Equatable {
     case badChecksum
     case unsupportedEntryType(UInt8)
     case invalidSize
+
+    // Streaming-only failures. The streaming writer declares an entry's size in the
+    // header before copying its bytes, so the supplied stream can turn out to disagree
+    // with what was promised — which is a different fault from a corrupt archive.
+
+    /// Entry exceeds what a USTAR 12-byte octal size field can express (just under 8 GiB).
+    case entryTooLarge(String)
+    /// The stream ran out before the declared size: (name, bytes written, declared size).
+    case entryEndedEarly(String, Int64, Int64)
+    /// The stream held more than the declared size, which would silently truncate the file.
+    case entryLongerThanDeclared(String, Int64)
 }
 
 public enum TarArchive {
