@@ -71,40 +71,19 @@ public enum TarArchive {
         return out
     }
 
+    /// Build a USTAR header block.
+    ///
+    /// Delegates to the streaming builder rather than keeping a second copy of the
+    /// format. Two independent implementations of the same wire format drift, and if
+    /// these two ever did, archives written by `create` and by `writeEntry` would stop
+    /// matching each other -- which would also break byte-parity with the Android
+    /// implementation. One builder, one behaviour.
+    ///
+    /// It also formats the octal size field by hand. `String(format: "%011o", size)`
+    /// passes a 64-bit Int through varargs to a conversion that reads a C unsigned int,
+    /// so entries at or above 4 GiB silently truncated to their low 32 bits.
     private static func header(name: String, size: Int) throws -> Data {
-        let nameBytes = Array(name.utf8)
-        guard nameBytes.count <= 100 else { throw TarArchiveError.nameTooLong(name) }
-
-        var h = [UInt8](repeating: 0, count: blockSize)
-
-        func put(_ s: String, at offset: Int, max: Int) {
-            for (i, b) in Array(s.utf8).prefix(max).enumerated() { h[offset + i] = b }
-        }
-        func putBytes(_ bytes: [UInt8], at offset: Int) {
-            for (i, b) in bytes.enumerated() { h[offset + i] = b }
-        }
-
-        putBytes(nameBytes, at: 0)                          // name (100)
-        put("0000644", at: 100, max: 7)                     // mode  + NUL
-        put("0000000", at: 108, max: 7)                     // uid
-        put("0000000", at: 116, max: 7)                     // gid
-        put(String(format: "%011o", size), at: 124, max: 11) // size (octal) + NUL
-        put("00000000000", at: 136, max: 11)                // mtime 0 + NUL
-        // checksum field (148..155): spaces while computing.
-        for i in 148..<156 { h[i] = 0x20 }
-        h[156] = 0x30                                       // typeflag '0' regular
-        put("ustar", at: 257, max: 5); h[262] = 0           // magic "ustar\0"
-        h[263] = 0x30; h[264] = 0x30                        // version "00"
-
-        // Checksum = sum of all bytes with the checksum field as spaces.
-        let sum = h.reduce(0) { $0 + Int($1) }
-        // 6 octal digits, NUL, space.
-        let cks = String(format: "%06o", sum)
-        putBytes(Array(cks.utf8), at: 148)
-        h[154] = 0
-        h[155] = 0x20
-
-        return Data(h)
+        try streamHeader(name: name, size: Int64(size))
     }
 
     // MARK: - Extract

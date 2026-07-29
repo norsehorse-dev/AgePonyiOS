@@ -314,9 +314,30 @@ final class TarArchiveStreamTests: XCTestCase {
         XCTAssertEqual(parsed?.name, "huge")
     }
 
-    func testStreamHeaderMatchesBufferedHeaderForOrdinarySizes() throws {
-        // The two header builders must agree byte for byte, or archives written by the
-        // streaming and buffered paths would differ.
+    /// `create` builds its header through the same code path as the streaming writer,
+    /// so this reads the octal size field straight out of a finished archive rather
+    /// than comparing the two builders to each other -- a comparison that would now
+    /// pass trivially and prove nothing.
+    ///
+    /// This is the check that would have caught the old `String(format: "%011o", size)`
+    /// truncation, where a 64-bit size passed through varargs to a conversion expecting
+    /// a C unsigned int.
+    func testCreateWritesCorrectOctalSizeField() throws {
+        for n in [0, 1, 511, 512, 1000, 100_000] {
+            let archive = try TarArchive.create([
+                TarArchive.Entry(name: "e", data: Data(count: n))
+            ])
+            let field = String(decoding: [UInt8](archive)[124..<135], as: UTF8.self)
+            XCTAssertEqual(field.count, 11, "size field should be 11 octal digits at \(n)")
+            XCTAssertEqual(Int(field, radix: 8), n, "size field decoded wrong at \(n)")
+            // And the reader agrees.
+            XCTAssertEqual(try TarArchive.extract(archive).first?.data.count, n)
+        }
+    }
+
+    /// Guards the delegation itself: if someone reintroduces a second header builder,
+    /// the two must still agree byte for byte.
+    func testBufferedAndStreamingHeadersAgree() throws {
         for n in [0, 1, 511, 512, 1000, 100_000] {
             let buffered = try TarArchive.create([
                 TarArchive.Entry(name: "e", data: Data(count: n))
