@@ -24,6 +24,7 @@ struct SettingsView: View {
 
     @State private var biometricEnabled: Bool
     @State private var encryptToSelfDefault: Bool
+    @State private var scryptWorkFactor: Int
     @State private var activeIdentityID: UUID?
 
     @State private var pendingReset: Bool = false
@@ -34,6 +35,7 @@ struct SettingsView: View {
         self.vault = vault
         _biometricEnabled       = State(initialValue: vault.biometricEnabled)
         _encryptToSelfDefault   = State(initialValue: vault.encryptToSelfDefault)
+        _scryptWorkFactor       = State(initialValue: vault.scryptWorkFactor)
         _activeIdentityID       = State(initialValue: vault.activeIdentityID)
     }
 
@@ -95,6 +97,21 @@ struct SettingsView: View {
     private var encryptionSection: some View {
         Section {
             Toggle("Encrypt to self by default", isOn: $encryptToSelfDefault)
+
+            Picker("Passphrase strength", selection: $scryptWorkFactor) {
+                ForEach(
+                    Array(ScryptMemory.minimumWorkFactor...ScryptMemory.maximumWorkFactor),
+                    id: \.self
+                ) { factor in
+                    Text(ScryptMemory.describe(workFactor: factor)).tag(factor)
+                }
+            }
+            Text(scryptFootnote)
+                .font(AgePonyTypography.caption)
+                .foregroundStyle(.secondary)
+                .onChange(of: scryptWorkFactor) { _, new in
+                    vault.scryptWorkFactor = new
+                }
                 .onChange(of: encryptToSelfDefault) { _, new in
                     vault.encryptToSelfDefault = new
                 }
@@ -261,6 +278,21 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    /// Explains the trade-off in the terms the user actually feels: time and
+    /// memory. Also warns when the current choice will not fit right now, since
+    /// the encrypt would otherwise fail only when attempted.
+    private var scryptFootnote: String {
+        var text = "Passphrase encryption deliberately costs memory to resist guessing. "
+        text += "Higher is stronger and slower; "
+        text += ScryptMemory.describe(workFactor: scryptWorkFactor)
+        text += " is what each passphrase file will cost to open, on any device. "
+        text += "This is unrelated to file size."
+        if !ScryptMemory.fits(workFactor: scryptWorkFactor) {
+            text += " This device may not have enough free memory for that right now."
+        }
+        return text
+    }
 
     private var biometricLabel: String {
         switch BiometricGate.availableBiometric() {

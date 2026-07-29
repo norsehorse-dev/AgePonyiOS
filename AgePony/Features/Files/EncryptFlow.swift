@@ -588,6 +588,7 @@ struct EncryptFlow: View {
 
         let inputsSnapshot = inputs
         let modeSnapshot = multiMode
+        let workFactorSnapshot = vault.scryptWorkFactor
         let recipientsSnapshot = recipients
         let passphraseSnapshot = passphrase
         let armorSnapshot = armor
@@ -606,6 +607,7 @@ struct EncryptFlow: View {
                         recipients: recipientsSnapshot,
                         passphrase: passphraseSnapshot,
                         armor: armorSnapshot,
+                        workFactor: workFactorSnapshot,
                         fileProgress: { done, total in
                             guard total > 0 else { return }
                             let fraction = Double(done) / Double(total)
@@ -626,6 +628,7 @@ struct EncryptFlow: View {
                             recipients: recipientsSnapshot,
                             passphrase: passphraseSnapshot,
                             armor: armorSnapshot,
+                            workFactor: workFactorSnapshot,
                             progress: onProgress
                         )
                     } else {
@@ -634,6 +637,7 @@ struct EncryptFlow: View {
                             recipients: recipientsSnapshot,
                             passphrase: passphraseSnapshot,
                             armor: armorSnapshot,
+                            workFactor: workFactorSnapshot,
                             progress: onProgress
                         )
                     }
@@ -771,6 +775,7 @@ struct EncryptFlow: View {
             case .ageError(let m):             return "Encrypt failed: \(m)"
             case .cannotOpenInput(let name):   return "Couldn't open \(name) for reading."
             case .cannotOpenOutput(let name):  return "Couldn't create \(name)."
+            case .scryptWontFit(let reason):   return reason
             }
         }
         if let e = error as? FileSignerError {

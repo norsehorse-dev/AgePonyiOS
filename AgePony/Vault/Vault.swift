@@ -51,6 +51,24 @@ public final class Vault {
         set { UserDefaults.standard.set(newValue, forKey: SettingsKey.biometricEnabled) }
     }
 
+    /// scrypt work factor for passphrase encrypts.
+    ///
+    /// Clamped to the supported range on read, so a value written by a future
+    /// build with a wider range cannot push this one into an allocation it
+    /// cannot survive.
+    public var scryptWorkFactor: Int {
+        get {
+            let stored = UserDefaults.standard.object(forKey: SettingsKey.scryptWorkFactor) as? Int
+            let value = stored ?? ScryptMemory.defaultWorkFactor
+            return min(max(value, ScryptMemory.minimumWorkFactor), ScryptMemory.maximumWorkFactor)
+        }
+        set {
+            let clamped = min(max(newValue, ScryptMemory.minimumWorkFactor),
+                              ScryptMemory.maximumWorkFactor)
+            UserDefaults.standard.set(clamped, forKey: SettingsKey.scryptWorkFactor)
+        }
+    }
+
     public var encryptToSelfDefault: Bool {
         get { UserDefaults.standard.object(forKey: SettingsKey.encryptToSelfDefault) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: SettingsKey.encryptToSelfDefault) }
@@ -315,6 +333,7 @@ public final class Vault {
     private enum SettingsKey {
         static let biometricEnabled       = "com.agepony.app.settings.biometricEnabled"
         static let encryptToSelfDefault   = "com.agepony.app.settings.encryptToSelfDefault"
+        static let scryptWorkFactor       = "com.agepony.app.settings.scryptWorkFactor"
         static let activeIdentityID       = "com.agepony.app.settings.activeIdentityID"
         static let hasCompletedOnboarding = "com.agepony.app.settings.hasCompletedOnboarding"
         static let hasSeenWalkthrough     = "com.agepony.app.settings.hasSeenWalkthrough"

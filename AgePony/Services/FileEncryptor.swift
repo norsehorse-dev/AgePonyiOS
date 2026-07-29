@@ -32,6 +32,10 @@ public enum FileEncryptorError: Error, Equatable {
     case ageError(String)
     case cannotOpenInput(String)
     case cannotOpenOutput(String)
+    /// scrypt's allocation will not fit. Carries a message naming the
+    /// allocation, because the cause is the passphrase's work factor and not
+    /// the size of the file.
+    case scryptWontFit(String)
 }
 
 /// Reports progress as `(bytesProcessed, totalBytes)`. `totalBytes` is 0 when the
@@ -40,13 +44,11 @@ public typealias FileProgressHandler = @Sendable (Int64, Int64) -> Void
 
 public enum FileEncryptor {
 
-    /// scrypt work factor used for passphrase encrypts.
+    /// scrypt work factor used when a caller does not specify one.
     ///
-    /// Lower than the age CLI default of 18. At 18 scrypt allocates ~256 MiB and
-    /// takes 20-60 seconds on an iPhone; 16 gives N=65536 and ~64 MiB in 2-5
-    /// seconds, which is still substantial brute-force resistance. The factor is
-    /// written into the file, so any age implementation can still read the result.
-    public static let mobileWorkFactor: Int = 16
+    /// One definition, in ScryptMemory, so the default cannot drift from the
+    /// range and cost calculations that describe it to the user.
+    public static let mobileWorkFactor: Int = ScryptMemory.defaultWorkFactor
 
     private static let copyBuffer = 64 * 1024
 
@@ -70,6 +72,11 @@ public enum FileEncryptor {
         }
         if usingPassphrase && !recipients.isEmpty {
             throw FileEncryptorError.scryptCannotMixWithRecipients
+        }
+        // Check the allocation before doing any work, rather than failing part
+        // way through with an error that looks like a file problem.
+        if usingPassphrase, let reason = ScryptMemory.blockingReason(workFactor: workFactor) {
+            throw FileEncryptorError.scryptWontFit(reason)
         }
 
         let scoped = inputURL.startAccessingSecurityScopedResource()
@@ -205,6 +212,9 @@ public enum FileEncryptor {
         if !usingPassphrase && recipients.isEmpty { throw FileEncryptorError.noRecipients }
         if usingPassphrase && !recipients.isEmpty {
             throw FileEncryptorError.scryptCannotMixWithRecipients
+        }
+        if usingPassphrase, let reason = ScryptMemory.blockingReason(workFactor: workFactor) {
+            throw FileEncryptorError.scryptWontFit(reason)
         }
 
         // Hold security-scoped access for every input across the whole read.
