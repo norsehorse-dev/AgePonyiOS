@@ -91,15 +91,16 @@ struct FileInfoCard: View {
 
     private func iconName(for kind: StanzaSummary.Kind) -> String {
         switch kind {
-        case .x25519:     return "key.fill"
-        case .sshEd25519: return "lock.shield"
-        case .sshRSA:     return "lock.shield"
-        case .scrypt:     return "lock.rectangle"
-        case .unknown:    return "questionmark.circle"
+        case .x25519:      return "key.fill"
+        case .sshEd25519:  return "lock.shield"
+        case .sshRSA:      return "lock.shield"
+        case .scrypt:      return "lock.rectangle"
+        case .postQuantum: return "atom"
+        case .unknown:     return "questionmark.circle"
         }
     }
 
     private var sizeString: String {
-        ByteCountFormatter.string(fromByteCount: Int64(summary.binaryByteCount), countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: Int64(summary.byteCount), countStyle: .file)
     }
 }

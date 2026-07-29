@@ -229,18 +229,21 @@ struct TextDecryptView: View {
         let passphraseSnapshot = passphraseInput
         let summarySnapshot = summary
         let identitiesSnapshot = vault.identities.compactMap { try? $0.toAgeIdentity() }
+        // Text mode always inspects buffered bytes, so the payload is present.
+        // The file flow uses the header-only inspector, where it is nil by design.
+        let binarySnapshot = summarySnapshot.binaryBytes ?? Data()
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let plaintext: Data
                 if summarySnapshot.onlyScrypt {
                     plaintext = try Age.decrypt(
-                        ciphertext: summarySnapshot.binaryBytes,
+                        ciphertext: binarySnapshot,
                         passphrase: passphraseSnapshot
                     )
                 } else {
                     plaintext = try Age.decrypt(
-                        ciphertext: summarySnapshot.binaryBytes,
+                        ciphertext: binarySnapshot,
                         identities: identitiesSnapshot
                     )
                 }
@@ -280,6 +283,8 @@ struct TextDecryptView: View {
             case .notAnAgeFile:          return "This doesn't look like an armored age block."
             case .malformedArmor:        return "The armored block is malformed."
             case .headerParseFailed(let m): return "Couldn't parse the age header: \(m)"
+            // Text mode inspects bytes already in hand, so this cannot arise here.
+            case .cannotOpenFile(let name): return "Couldn't open \(name)."
             }
         }
         return error.localizedDescription
@@ -299,7 +304,7 @@ private struct FileInfoSection: View {
     var body: some View {
         Section {
             HStack(spacing: 16) {
-                meta("Size", ByteCountFormatter.string(fromByteCount: Int64(summary.binaryByteCount), countStyle: .file))
+                meta("Size", ByteCountFormatter.string(fromByteCount: Int64(summary.byteCount), countStyle: .file))
                 meta("Format", summary.armored ? "PEM-armored" : "Binary")
                 meta("Recipients", "\(summary.stanzas.count)")
                 Spacer()
@@ -339,11 +344,12 @@ private struct FileInfoSection: View {
 
     private func icon(for kind: StanzaSummary.Kind) -> String {
         switch kind {
-        case .x25519:     return "key.fill"
-        case .sshEd25519: return "lock.shield"
-        case .sshRSA:     return "lock.shield"
-        case .scrypt:     return "lock.rectangle"
-        case .unknown:    return "questionmark.circle"
+        case .x25519:      return "key.fill"
+        case .sshEd25519:  return "lock.shield"
+        case .sshRSA:      return "lock.shield"
+        case .scrypt:      return "lock.rectangle"
+        case .postQuantum: return "atom"
+        case .unknown:     return "questionmark.circle"
         }
     }
 }

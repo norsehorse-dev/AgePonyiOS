@@ -36,6 +36,8 @@ struct DecryptFlow: View {
     @State private var summary: AgeFileSummary?
     @State private var passphrase: String = ""
     @State private var working: Bool = false
+    /// Fraction of the input consumed, or nil before the first report.
+    @State private var progressFraction: Double?
     @State private var errorMessage: String?
     @State private var resultURL: URL?
 
@@ -185,9 +187,20 @@ struct DecryptFlow: View {
     private var decryptingStage: some View {
         VStack(spacing: 18) {
             Spacer()
-            ProgressView()
-                .controlSize(.large)
-                .tint(AgePonyColors.tealCore)
+            if let progressFraction {
+                ProgressView(value: progressFraction)
+                    .progressViewStyle(.linear)
+                    .tint(AgePonyColors.tealCore)
+                    .padding(.horizontal, 48)
+                Text("\(Int(progressFraction * 100))%")
+                    .font(AgePonyTypography.monoCaption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(AgePonyColors.tealCore)
+            }
             Text("Decrypting…")
                 .font(AgePonyTypography.headline)
                 .foregroundStyle(.secondary)
@@ -268,16 +281,15 @@ struct DecryptFlow: View {
 
     private func runInspect() async {
         guard let url = sourceURL else { return }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
         do {
-            let bytes = try Data(contentsOf: url)
-            let s = try AgeFileInspector.inspect(
-                fileBytes: bytes,
+            // Header only: instant on a file of any size, and holds nothing but
+            // the header. The whole file used to be read here, converted to a
+            // String to sniff for armor, decoded, and then kept alive in view
+            // state until the screen went away.
+            summary = try AgeFileInspector.inspect(
+                fileURL: url,
                 knownIdentities: vault.identities
             )
-            summary = s
             stage = .ready
         } catch {
             errorMessage = describeInspect(error)
@@ -286,44 +298,65 @@ struct DecryptFlow: View {
     }
 
     private func runDecrypt() async {
-        guard let summary else { return }
+        guard let summary, let url = sourceURL else { return }
+
+        // Authenticate first, on the main actor, before any heavy work begins.
+        // The passphrase path needs no biometric: the passphrase is itself the
+        // authentication. The identity path prompts before private material is
+        // used, even though the master key is already in memory — defence in
+        // depth, and a signal to the user that something is being unlocked.
+        if !summary.onlyScrypt {
+            do {
+                try await BiometricGate.authenticate(reason: "Decrypt \"\(sourceName)\"")
+            } catch BiometricGateError.userCancelled {
+                return
+            } catch {
+                errorMessage = describeDecrypt(error)
+                return
+            }
+        }
+
         stage = .decrypting
         working = true
+        progressFraction = nil
 
-        do {
-            if summary.onlyScrypt {
-                // Passphrase path — no biometric needed; the passphrase IS
-                // the authentication.
-                let outURL = try FileEncryptor.decryptPassphraseBased(
-                    binaryAgeBytes: summary.binaryBytes,
-                    outputBaseName: sourceName,
-                    passphrase: passphrase
+        let usingPassphrase = summary.onlyScrypt
+        let passphraseSnapshot = passphrase
+        let identitiesSnapshot: [any AgeIdentity] = usingPassphrase
+            ? []
+            : vault.identities.compactMap { try? $0.toAgeIdentity() }
+
+        // Off the main thread. Files of any size decrypt now, and a large one
+        // run inline would block the UI long enough for the iOS watchdog to
+        // terminate the app — the same reason EncryptFlow dispatches.
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let outURL = try FileEncryptor.decrypt(
+                    inputURL: url,
+                    identities: identitiesSnapshot,
+                    passphrase: usingPassphrase ? passphraseSnapshot : nil,
+                    progress: { done, total in
+                        guard total > 0 else { return }
+                        let fraction = Double(done) / Double(total)
+                        DispatchQueue.main.async { progressFraction = fraction }
+                    }
                 )
-                resultURL = outURL
-                stage = .done
-            } else {
-                // Identity path — biometric prompt before exposing private
-                // material from the vault, even though we already hold the
-                // master key in memory. Defense in depth + user signal.
-                try await BiometricGate.authenticate(
-                    reason: "Decrypt \"\(sourceName)\""
-                )
-                let identities = vault.identities.compactMap { try? $0.toAgeIdentity() }
-                let outURL = try FileEncryptor.decryptIdentityBased(
-                    binaryAgeBytes: summary.binaryBytes,
-                    outputBaseName: sourceName,
-                    identities: identities
-                )
-                resultURL = outURL
-                stage = .done
+                DispatchQueue.main.async {
+                    resultURL = outURL
+                    stage = .done
+                    working = false
+                    progressFraction = nil
+                }
+            } catch {
+                let description = describeDecrypt(error)
+                DispatchQueue.main.async {
+                    errorMessage = description
+                    stage = .ready
+                    working = false
+                    progressFraction = nil
+                }
             }
-        } catch BiometricGateError.userCancelled {
-            stage = .ready
-        } catch {
-            errorMessage = describeDecrypt(error)
-            stage = .ready
         }
-        working = false
     }
 
     private func cleanupAndDismiss() {
@@ -337,6 +370,7 @@ struct DecryptFlow: View {
             case .notAnAgeFile:          return "This file isn't an age-encrypted file."
             case .malformedArmor:        return "The armored block is malformed."
             case .headerParseFailed(let m): return "Couldn't parse the age header: \(m)"
+            case .cannotOpenFile(let name): return "Couldn't open \(name)."
             }
         }
         return error.localizedDescription

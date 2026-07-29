@@ -3,18 +3,30 @@
 //  AgePony
 //
 //  Pre-flight inspection of a .age file. The Decrypt flow runs this before
-//  prompting biometric / asking for a passphrase, so the user sees what
-//  they're about to decrypt before the OS authentication popup fires.
+//  prompting for biometrics or a passphrase, so the user sees what they are
+//  about to decrypt before the OS authentication popup fires.
 //
-//  We don't attempt to decrypt here — we just parse the header to enumerate
-//  the recipient stanzas. This is cheap (no scrypt KDF, no key agreement)
-//  and lets the FileInfoCard show:
-//      • size of the file
-//      • armor format (binary or PEM)
-//      • per-stanza summary ("1 X25519, 2 ssh-ed25519, 1 scrypt passphrase")
-//      • for SSH stanzas, a "matches your identity 'X'" hint when the
-//        first stanza arg (the 4-byte SHA256-tag of the SSH wire blob)
-//        matches one of the user's stored SSH identities.
+//  Nothing is decrypted here. Only the header is parsed, which is cheap — no
+//  scrypt KDF, no key agreement — and lets FileInfoCard show the file's size,
+//  its format, a per-stanza summary, and for SSH stanzas a "matches your
+//  identity X" hint.
+//
+//  Two entry points, because the two callers have genuinely different needs:
+//
+//    inspect(fileURL:)   — reads only the header off disk. A file of any size
+//                          inspects instantly and costs a few KB of memory.
+//                          Used by the Files decrypt flow.
+//
+//    inspect(fileBytes:) — takes bytes already in hand and keeps the decoded
+//                          payload in the summary. Used by Text mode, where
+//                          the input is pasted text and is small by nature.
+//
+//  The URL path exists because the buffered one was the real memory ceiling on
+//  the decrypt side: it held the file as Data, converted the *whole* file to a
+//  String to sniff for armor, decoded that whole string, and then kept the
+//  decoded payload alive in the view's state for as long as the screen was up.
+//  For a 130 MB armored file that is several hundred MB resident before the
+//  user has even tapped Decrypt.
 //
 
 import Foundation
@@ -22,11 +34,20 @@ import CryptoKit
 import AgePonyCore
 
 public struct AgeFileSummary: Equatable {
-    public let binaryByteCount: Int          // size of the underlying binary age payload
-    public let armored: Bool                  // true if input was PEM-armored
+    /// Size of the age payload. For a file read from disk this is its size on
+    /// disk, which is what the user recognises; for pasted text it is the size
+    /// of the decoded binary.
+    public let byteCount: Int
+    /// True if the input was PEM-armored.
+    public let armored: Bool
     public let stanzas: [StanzaSummary]
-    public let onlyScrypt: Bool               // true if every stanza is "scrypt"
-    public let binaryBytes: Data              // the binary age payload (already unarmored if needed)
+    /// True if every stanza is "scrypt", meaning a passphrase is the only way in.
+    public let onlyScrypt: Bool
+    /// The binary age payload, when the caller already had it in memory.
+    ///
+    /// nil for the URL-based inspection, which never reads past the header —
+    /// that is the point of it. Callers decrypt from the file instead.
+    public let binaryBytes: Data?
 }
 
 public struct StanzaSummary: Equatable, Identifiable {
@@ -35,8 +56,8 @@ public struct StanzaSummary: Equatable, Identifiable {
     /// For SSH stanzas, the first 4 bytes of SHA256(wireBlob) in base64.
     /// nil for X25519 (anonymous-recipient stanzas) and scrypt.
     public let sshTag: String?
-    /// Set by the inspector when the sshTag matches one of the user's
-    /// own identities. Used to render the "matches your X identity" hint.
+    /// Set by the inspector when the sshTag matches one of the user's own
+    /// identities. Used to render the "matches your X identity" hint.
     public let matchedIdentityName: String?
 
     public enum Kind: String, Equatable {
@@ -44,15 +65,17 @@ public struct StanzaSummary: Equatable, Identifiable {
         case sshEd25519    = "ssh-ed25519"
         case sshRSA        = "ssh-rsa"
         case scrypt        = "scrypt"
+        case postQuantum   = "mlkem768x25519"
         case unknown       = "unknown"
 
         public var displayLabel: String {
             switch self {
-            case .x25519:     return "age X25519 recipient"
-            case .sshEd25519: return "SSH Ed25519 recipient"
-            case .sshRSA:     return "SSH RSA recipient"
-            case .scrypt:     return "Passphrase (scrypt)"
-            case .unknown:    return "Unknown recipient type"
+            case .x25519:      return "age X25519 recipient"
+            case .sshEd25519:  return "SSH Ed25519 recipient"
+            case .sshRSA:      return "SSH RSA recipient"
+            case .scrypt:      return "Passphrase (scrypt)"
+            case .postQuantum: return "Post-quantum recipient"
+            case .unknown:     return "Unknown recipient type"
             }
         }
     }
@@ -68,14 +91,69 @@ public enum AgeFileInspectorError: Error, Equatable {
     case notAnAgeFile
     case malformedArmor
     case headerParseFailed(String)
+    case cannotOpenFile(String)
 }
 
 public enum AgeFileInspector {
 
-    /// Inspect a buffer of .age file bytes. Auto-detects armor and unwraps
-    /// before parsing the header.
-    public static func inspect(fileBytes raw: Data, knownIdentities: [StoredIdentity]) throws -> AgeFileSummary {
-        // Detect armor by sniffing the first ~64 bytes as UTF-8.
+    // MARK: - Header-only inspection, from disk
+
+    /// Inspect a file by reading only its header.
+    ///
+    /// Instant regardless of file size, and holds nothing but the header. The
+    /// returned summary has a nil `binaryBytes`; decrypt straight from the file.
+    public static func inspect(
+        fileURL: URL,
+        knownIdentities: [StoredIdentity]
+    ) throws -> AgeFileSummary {
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
+
+        let armored = try sniffArmored(fileURL)
+
+        guard let raw = InputStream(url: fileURL) else {
+            throw AgeFileInspectorError.cannotOpenFile(fileURL.lastPathComponent)
+        }
+        raw.open()
+        defer { raw.close() }
+
+        let source: InputStream = armored ? ArmorDecodingSource(raw) : raw
+        source.open()
+
+        let header: AgeHeader
+        do {
+            header = try Age.parseHeaderStream(ciphertext: source)
+        } catch {
+            // An armor fault surfaces on the decoding source rather than as a
+            // header error, so report that specifically when it is the cause.
+            if armored, (source as? ArmorDecodingSource)?.streamError != nil {
+                throw AgeFileInspectorError.malformedArmor
+            }
+            throw mapHeaderError(error)
+        }
+
+        let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)??
+            .intValue ?? 0
+
+        return summarize(
+            header: header,
+            byteCount: size,
+            armored: armored,
+            binaryBytes: nil,
+            knownIdentities: knownIdentities
+        )
+    }
+
+    // MARK: - Buffered inspection, for bytes already in hand
+
+    /// Inspect bytes already in memory, keeping the decoded payload in the summary.
+    ///
+    /// For Text mode, where the input is pasted and small. Prefer the URL entry
+    /// point for anything file-sized.
+    public static func inspect(
+        fileBytes raw: Data,
+        knownIdentities: [StoredIdentity]
+    ) throws -> AgeFileSummary {
         let armored: Bool
         let binary: Data
         if let text = String(data: raw, encoding: .utf8), AgeArmor.looksArmored(text) {
@@ -90,9 +168,7 @@ public enum AgeFileInspector {
             binary = raw
         }
 
-        // The binary form must start with the age v1 version line.
-        let versionLine = AgeHeaderConstants.versionLine + "\n"
-        let versionBytes = Data(versionLine.utf8)
+        let versionBytes = Data((AgeHeaderConstants.versionLine + "\n").utf8)
         guard binary.count >= versionBytes.count,
               binary.prefix(versionBytes.count) == versionBytes else {
             throw AgeFileInspectorError.notAnAgeFile
@@ -101,14 +177,54 @@ public enum AgeFileInspector {
         let header: AgeHeader
         do {
             (header, _) = try AgeHeader.parse(bytes: binary)
-        } catch let e as AgeHeaderError {
-            throw AgeFileInspectorError.headerParseFailed(String(describing: e))
         } catch {
-            throw AgeFileInspectorError.headerParseFailed(error.localizedDescription)
+            throw mapHeaderError(error)
         }
 
-        // Pre-compute the SSH tag for each of the user's SSH identities so
-        // we can match stanzas to them and surface the matched identity name.
+        return summarize(
+            header: header,
+            byteCount: binary.count,
+            armored: armored,
+            binaryBytes: binary,
+            knownIdentities: knownIdentities
+        )
+    }
+
+    // MARK: - Internals
+
+    /// Read only the first bytes to decide whether the file is armored.
+    private static func sniffArmored(_ url: URL) throws -> Bool {
+        guard let probe = InputStream(url: url) else {
+            throw AgeFileInspectorError.cannotOpenFile(url.lastPathComponent)
+        }
+        probe.open()
+        defer { probe.close() }
+        var buffer = [UInt8](repeating: 0, count: AgeArmor.sniffLength)
+        let n = probe.read(&buffer, maxLength: buffer.count)
+        guard n > 0 else { throw AgeFileInspectorError.notAnAgeFile }
+        return AgeArmor.looksArmored(prefix: Data(buffer[0..<n]))
+    }
+
+    private static func mapHeaderError(_ error: Error) -> AgeFileInspectorError {
+        if let e = error as? AgeError {
+            switch e {
+            case .headerError(let h): return .headerParseFailed(String(describing: h))
+            default:                  return .headerParseFailed(String(describing: e))
+            }
+        }
+        if let e = error as? AgeHeaderError {
+            return .headerParseFailed(String(describing: e))
+        }
+        return .headerParseFailed(error.localizedDescription)
+    }
+
+    private static func summarize(
+        header: AgeHeader,
+        byteCount: Int,
+        armored: Bool,
+        binaryBytes: Data?,
+        knownIdentities: [StoredIdentity]
+    ) -> AgeFileSummary {
         let identityTags = sshTagsByIdentityName(knownIdentities)
 
         var summaries: [StanzaSummary] = []
@@ -133,6 +249,8 @@ public enum AgeFileInspector {
                 ))
             case "scrypt":
                 summaries.append(StanzaSummary(kind: .scrypt))
+            case "mlkem768x25519":
+                summaries.append(StanzaSummary(kind: .postQuantum))
             default:
                 summaries.append(StanzaSummary(kind: .unknown))
             }
@@ -141,11 +259,11 @@ public enum AgeFileInspector {
         let onlyScrypt = !summaries.isEmpty && summaries.allSatisfy { $0.kind == .scrypt }
 
         return AgeFileSummary(
-            binaryByteCount: binary.count,
+            byteCount: byteCount,
             armored: armored,
             stanzas: summaries,
             onlyScrypt: onlyScrypt,
-            binaryBytes: binary
+            binaryBytes: binaryBytes
         )
     }
 
