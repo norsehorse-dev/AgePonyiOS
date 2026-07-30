@@ -22,6 +22,7 @@ struct FilesView: View {
     @State private var showDecrypt: Bool = false
     @State private var showSign: Bool = false
     @State private var showVerify: Bool = false
+    @State private var showInspect: Bool = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -69,6 +70,13 @@ struct FilesView: View {
                     Label("Verify a file", systemImage: "checkmark.seal")
                 }
                 .buttonStyle(.agePonySecondary)
+
+                Button {
+                    showInspect = true
+                } label: {
+                    Label("Inspect a file", systemImage: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.agePonySecondary)
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 32)
@@ -93,6 +101,11 @@ struct FilesView: View {
         .sheet(isPresented: $showVerify) {
             NavigationStack {
                 VerifyFileView(vault: vault)
+            }
+        }
+        .sheet(isPresented: $showInspect) {
+            NavigationStack {
+                InspectFlow(vault: vault)
             }
         }
         .onChange(of: pendingExternalDecryptURL) { _, newValue in

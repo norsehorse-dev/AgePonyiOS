@@ -74,7 +74,16 @@ struct FileInfoCard: View {
                 Text(s.kind.displayLabel)
                     .font(AgePonyTypography.footnote)
                     .foregroundStyle(AgePonyColors.tealInk)
-                if let matched = s.matchedIdentityName {
+                if let factor = s.scryptWorkFactor {
+                    // What this file costs to open — a property of the file,
+                    // not of this device's setting.
+                    Text(ScryptMemory.describe(workFactor: factor)
+                         + (ScryptMemory.fits(workFactor: factor)
+                            ? "" : " · may not fit in memory right now"))
+                        .font(AgePonyTypography.caption)
+                        .foregroundStyle(ScryptMemory.fits(workFactor: factor)
+                                         ? Color.secondary : Color.orange)
+                } else if let matched = s.matchedIdentityName {
                     Text("matches your identity \"\(matched)\"")
                         .font(AgePonyTypography.caption)
                         .foregroundStyle(AgePonyColors.tealCore)

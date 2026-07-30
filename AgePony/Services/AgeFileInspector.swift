@@ -48,6 +48,25 @@ public struct AgeFileSummary: Equatable {
     /// nil for the URL-based inspection, which never reads past the header —
     /// that is the point of it. Callers decrypt from the file instead.
     public let binaryBytes: Data?
+
+    /// True if any recipient is post-quantum.
+    public var isPostQuantum: Bool {
+        stanzas.contains { $0.kind == .postQuantum }
+    }
+
+    /// True if a stanza names one of the user's own identities.
+    ///
+    /// Only SSH stanzas carry a recipient tag; X25519 and post-quantum stanzas
+    /// are deliberately anonymous, so false means "cannot tell from the header",
+    /// not "you cannot open it".
+    public var matchesAKnownIdentity: Bool {
+        stanzas.contains { $0.matchedIdentityName != nil }
+    }
+
+    /// The scrypt work factor, when this is a passphrase file.
+    public var scryptWorkFactor: Int? {
+        stanzas.compactMap(\.scryptWorkFactor).first
+    }
 }
 
 public struct StanzaSummary: Equatable, Identifiable {
@@ -59,6 +78,11 @@ public struct StanzaSummary: Equatable, Identifiable {
     /// Set by the inspector when the sshTag matches one of the user's own
     /// identities. Used to render the "matches your X identity" hint.
     public let matchedIdentityName: String?
+    /// For scrypt stanzas, the work factor recorded in the file.
+    ///
+    /// What opening the file will cost, regardless of the reader's own setting:
+    /// the factor travels with the file, not with the app.
+    public let scryptWorkFactor: Int?
 
     public enum Kind: String, Equatable {
         case x25519        = "X25519"
@@ -80,10 +104,16 @@ public struct StanzaSummary: Equatable, Identifiable {
         }
     }
 
-    public init(kind: Kind, sshTag: String? = nil, matchedIdentityName: String? = nil) {
+    public init(
+        kind: Kind,
+        sshTag: String? = nil,
+        matchedIdentityName: String? = nil,
+        scryptWorkFactor: Int? = nil
+    ) {
         self.kind = kind
         self.sshTag = sshTag
         self.matchedIdentityName = matchedIdentityName
+        self.scryptWorkFactor = scryptWorkFactor
     }
 }
 
@@ -248,7 +278,9 @@ public enum AgeFileInspector {
                     matchedIdentityName: tag.flatMap { identityTags[$0] }
                 ))
             case "scrypt":
-                summaries.append(StanzaSummary(kind: .scrypt))
+                // -> scrypt <base64 salt> <workFactor>
+                let factor = stanza.args.count >= 2 ? Int(stanza.args[1]) : nil
+                summaries.append(StanzaSummary(kind: .scrypt, scryptWorkFactor: factor))
             case "mlkem768x25519":
                 summaries.append(StanzaSummary(kind: .postQuantum))
             default:
