@@ -236,10 +236,9 @@ struct AgePonyTests {
 
     // MARK: - SignEncryptService (C3)
 
-    /// Combined encrypt-then-sign: both files are co-located, the .age decrypts
-    /// to the original plaintext, and the .sig verifies against the signer over
-    /// the encrypted bytes.
-    @Test func signEncryptProducesVerifiableSignature() async throws {
+    /// Sign-then-encrypt: one file goes out, and what it decrypts to is a signed
+    /// bundle whose signature covers the *plaintext*, not the ciphertext.
+    @Test func signEncryptProducesOneFileCarryingItsSignature() async throws {
         let (signer, _, signerPub) = makeEd25519Identity(name: "Signer")
         let x = X25519Identity.generate()
         let recipient = try X25519Recipient(publicKey: x.publicKey)
@@ -259,23 +258,40 @@ struct AgePonyTests {
         )
         defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
 
-        // Co-located, correctly named.
-        #expect(out.signatureURL.deletingLastPathComponent() == out.encryptedURL.deletingLastPathComponent())
-        #expect(out.signatureURL.lastPathComponent == out.encryptedURL.lastPathComponent + ".sig")
+        // One output, named after the input. No detached signature beside it.
+        #expect(out.encryptedURL.lastPathComponent == tmp.lastPathComponent + ".age")
+        #expect(out.payloadSize == Int64(plaintext.count))
+        let siblings = try FileManager.default.contentsOfDirectory(
+            atPath: out.encryptedURL.deletingLastPathComponent().path
+        )
+        #expect(siblings == [out.encryptedURL.lastPathComponent])
 
-        // Signature verifies over the ciphertext bytes.
+        // The ciphertext decrypts to a bundle, not to the plaintext directly.
         let ageBytes = try Data(contentsOf: out.encryptedURL)
-        let sigText = try String(contentsOf: out.signatureURL, encoding: .utf8)
+        let inner = try Age.decrypt(ciphertext: ageBytes, identities: [x])
+        #expect(inner != plaintext)
+        #expect(SignedBundle.looksLikeBundle(inner))
+
+        let bundle = try #require(SignedBundle.parse(inner))
+        #expect(bundle.name == tmp.lastPathComponent)
+        #expect(bundle.payload == plaintext)
+
+        // The signature covers the plaintext.
         let v = try SSHSigVerifier.verify(
-            message: ageBytes,
-            armoredSignature: sigText,
+            message: plaintext,
+            armoredSignature: bundle.signatureArmored,
             expectedNamespace: SSHSig.defaultNamespace
         )
         #expect(v.publicKeyWire == SSHSig.ed25519PublicKeyWire(signerPub))
 
-        // Ciphertext decrypts back to the original plaintext.
-        let decrypted = try Age.decrypt(ciphertext: ageBytes, identities: [x])
-        #expect(decrypted == plaintext)
+        // And not the ciphertext -- the 2.0 shape is genuinely gone.
+        #expect(throws: SSHSigError.signatureInvalid) {
+            _ = try SSHSigVerifier.verify(
+                message: ageBytes,
+                armoredSignature: bundle.signatureArmored,
+                expectedNamespace: SSHSig.defaultNamespace
+            )
+        }
     }
 
     /// An X25519 identity can't be a signing identity for the combined flow.
@@ -303,5 +319,134 @@ struct AgePonyTests {
                 signingIdentity: xIdentity
             )
         }
+    }
+
+    // MARK: - Sign-then-encrypt, all the way back (10c)
+
+    /// The whole 3.0 shape end to end, through the real services: sign, encrypt,
+    /// decrypt, verify.
+    ///
+    /// The encrypted file is renamed before decrypting, so the original filename
+    /// can only come from the bundle's manifest -- stripping `.age` would give
+    /// "opaque", not "quarterly report.pdf".
+    @Test(arguments: [false, true])
+    func signedFileDecryptsToItsPayloadAndVerifies(armor: Bool) async throws {
+        let (signer, _, signerPub) = makeEd25519Identity(name: "Signer")
+        let x = X25519Identity.generate()
+        let recipient = try X25519Recipient(publicKey: x.publicKey)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agepony-10c-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let original = dir.appendingPathComponent("quarterly report.pdf")
+        let plaintext = Data((0..<300_000).map { UInt8($0 % 251) })
+        try plaintext.write(to: original)
+
+        let out = try SignEncryptService.signEncrypt(
+            inputURL: original,
+            recipients: [recipient],
+            passphrase: nil,
+            armor: armor,
+            signingIdentity: signer
+        )
+        defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
+
+        // Launder the filename: whatever comes back now had to come from inside.
+        let opaque = dir.appendingPathComponent("opaque.age")
+        try FileManager.default.copyItem(at: out.encryptedURL, to: opaque)
+
+        let outcome = try FileEncryptor.decrypt(
+            inputURL: opaque, identities: [x], passphrase: nil
+        )
+        defer { FileEncryptor.cleanupTempFile(at: outcome.url) }
+
+        #expect(outcome.isSigned)
+        #expect(outcome.url.lastPathComponent == "quarterly report.pdf")
+        let recovered = try Data(contentsOf: outcome.url)
+        #expect(recovered == plaintext)
+
+        // Attributed against the vault, from the streamed digests alone.
+        let bundle = try #require(outcome.signedBundle)
+        #expect(bundle.payloadSize == Int64(plaintext.count))
+        let verdict = FileVerifier.verify(bundle: bundle, identities: [signer], recipients: [])
+        #expect(verdict.trust == .trusted(signerName: "Signer", isOwnIdentity: true))
+        #expect(verdict.signerPublicKeyWire == SSHSig.ed25519PublicKeyWire(signerPub))
+    }
+
+    /// An unsigned file is unaffected: no wrapper, no verdict, name derived from
+    /// stripping `.age` as it always was. This is the 2.0-file path.
+    @Test func plainEncryptedFileDecryptsWithNoSignature() async throws {
+        let x = X25519Identity.generate()
+        let recipient = try X25519Recipient(publicKey: x.publicKey)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agepony-10c-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let original = dir.appendingPathComponent("notes.txt")
+        let plaintext = Data("nothing signed here".utf8)
+        try plaintext.write(to: original)
+
+        let encrypted = try FileEncryptor.encrypt(
+            inputURL: original, recipients: [recipient], passphrase: nil, armor: false
+        )
+        defer { FileEncryptor.cleanupTempFile(at: encrypted) }
+
+        let outcome = try FileEncryptor.decrypt(
+            inputURL: encrypted, identities: [x], passphrase: nil
+        )
+        defer { FileEncryptor.cleanupTempFile(at: outcome.url) }
+
+        #expect(!outcome.isSigned)
+        #expect(outcome.signedBundle == nil)
+        #expect(outcome.url.lastPathComponent == "notes.txt")
+        let recovered = try Data(contentsOf: outcome.url)
+        #expect(recovered == plaintext)
+    }
+
+    /// Re-encrypting must not strip a signature, so the migrate path decrypts with
+    /// the bundle left whole.
+    @Test func decryptCanLeaveTheBundleWrapped() async throws {
+        let (signer, _, _) = makeEd25519Identity(name: "Signer")
+        let x = X25519Identity.generate()
+        let recipient = try X25519Recipient(publicKey: x.publicKey)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agepony-10c-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let original = dir.appendingPathComponent("memo.txt")
+        let plaintext = Data("keep the signature".utf8)
+        try plaintext.write(to: original)
+
+        let out = try SignEncryptService.signEncrypt(
+            inputURL: original,
+            recipients: [recipient],
+            passphrase: nil,
+            armor: false,
+            signingIdentity: signer
+        )
+        defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
+
+        let outcome = try FileEncryptor.decrypt(
+            inputURL: out.encryptedURL,
+            identities: [x],
+            passphrase: nil,
+            unwrapSignedBundle: false
+        )
+        defer { FileEncryptor.cleanupTempFile(at: outcome.url) }
+
+        // No verdict, because nothing was unwrapped -- but the bundle is intact on
+        // disk, ready to be re-encrypted with its signature still inside.
+        #expect(outcome.signedBundle == nil)
+        let onDisk = try Data(contentsOf: outcome.url)
+        #expect(SignedBundle.looksLikeBundle(onDisk))
+        let bundle = try #require(SignedBundle.parse(onDisk))
+        #expect(bundle.name == "memo.txt")
+        #expect(bundle.payload == plaintext)
     }
 }

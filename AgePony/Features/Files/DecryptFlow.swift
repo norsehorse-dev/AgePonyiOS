@@ -40,6 +40,8 @@ struct DecryptFlow: View {
     @State private var progressFraction: Double?
     @State private var errorMessage: String?
     @State private var resultURL: URL?
+    /// The verdict on a signed bundle's signature, when the file carried one.
+    @State private var signature: FileVerificationResult?
 
     @State private var showFilePicker: Bool = false
 
@@ -223,6 +225,14 @@ struct DecryptFlow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            // The signature is the last thing in a bundle, so its verdict can only
+            // be known once the payload has already been written. A failed one has
+            // to be shown loudly here -- the file exists either way, and a user who
+            // sees only "Decrypted" would reasonably assume it was vouched for.
+            if let signature {
+                CompactVerifiedBadge(result: signature)
+                    .padding(.top, 6)
+            }
             Spacer()
             VStack(spacing: 12) {
                 if let url = resultURL {
@@ -275,6 +285,10 @@ struct DecryptFlow: View {
     private func handlePicked(url: URL) {
         sourceURL = url
         sourceName = url.lastPathComponent
+        // A verdict belongs to one file. Picking another must not leave the
+        // previous file's badge on screen.
+        signature = nil
+        resultURL = nil
         stage = .inspecting
         Task { await runInspect() }
     }
@@ -326,12 +340,19 @@ struct DecryptFlow: View {
             ? []
             : vault.identities.compactMap { try? $0.toAgeIdentity() }
 
+        // Snapshot the vault for signer attribution too: if the plaintext turns
+        // out to be a signed bundle, the verdict is worked out on the background
+        // thread rather than reaching back onto the main actor for it.
+        let storedIdentities = vault.identities
+        let storedRecipients = vault.recipients
+        let storedSigners = vault.signers
+
         // Off the main thread. Files of any size decrypt now, and a large one
         // run inline would block the UI long enough for the iOS watchdog to
         // terminate the app — the same reason EncryptFlow dispatches.
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let outURL = try FileEncryptor.decrypt(
+                let outcome = try FileEncryptor.decrypt(
                     inputURL: url,
                     identities: identitiesSnapshot,
                     passphrase: usingPassphrase ? passphraseSnapshot : nil,
@@ -341,8 +362,19 @@ struct DecryptFlow: View {
                         DispatchQueue.main.async { progressFraction = fraction }
                     }
                 )
+
+                let verdict = outcome.signedBundle.map {
+                    FileVerifier.verify(
+                        bundle: $0,
+                        identities: storedIdentities,
+                        recipients: storedRecipients,
+                        signers: storedSigners
+                    )
+                }
+
                 DispatchQueue.main.async {
-                    resultURL = outURL
+                    resultURL = outcome.url
+                    signature = verdict
                     stage = .done
                     working = false
                     progressFraction = nil
@@ -386,6 +418,7 @@ struct DecryptFlow: View {
                 }
                 return "Decrypt failed: \(m)"
             case .readFailed(let m):  return "Couldn't read input: \(m)"
+            case .bundleDamaged(let m): return "This file decrypted, but the signed bundle inside it is damaged: \(m)"
             case .writeFailed(let m): return "Couldn't write output: \(m)"
             default:                  return String(describing: e)
             }

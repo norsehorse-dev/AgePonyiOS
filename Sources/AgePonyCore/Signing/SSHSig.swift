@@ -56,6 +56,10 @@ public enum SSHSigError: Error, Equatable {
     case unsupportedHashAlgorithm(String)
     case malformedPublicKey
     case malformedInnerSignature
+    /// A precomputed digest was supplied whose length doesn't match the hash
+    /// algorithm it claims. Caught rather than signed, because the resulting
+    /// signature would be silently unverifiable.
+    case malformedMessageHash
     case namespaceMismatch(expected: String, found: String)
     case signatureInvalid
     case signingFailed(String)
@@ -73,6 +77,25 @@ public enum SSHSigHash: String, Equatable, Sendable {
         switch self {
         case .sha256: return Data(SHA256.hash(data: message))
         case .sha512: return Data(SHA512.hash(data: message))
+        }
+    }
+
+    /// Length in bytes of a digest under this algorithm.
+    public var digestLength: Int {
+        switch self {
+        case .sha256: return 32
+        case .sha512: return 64
+        }
+    }
+
+    /// Reject a precomputed digest that cannot be one of ours.
+    ///
+    /// The wire format has no room to disagree: a wrong-length digest produces a
+    /// well-formed signature that simply never verifies. Failing here turns a
+    /// silent, much-later mystery into an immediate error.
+    public func validate(digest: Data) throws {
+        guard digest.count == digestLength else {
+            throw SSHSigError.malformedMessageHash
         }
     }
 }

@@ -37,10 +37,32 @@ public enum SSHSigner {
         namespace: String = SSHSig.defaultNamespace,
         hash: SSHSigHash = .sha512
     ) throws -> String {
+        try signEd25519(
+            messageHash: hash.digest(message),
+            seed: seed,
+            publicKey: publicKey,
+            namespace: namespace,
+            hash: hash
+        )
+    }
+
+    /// Sign a message *digest* with an Ed25519 key.
+    ///
+    /// SSHSIG only ever covers the hash, so a file too large to hold in memory can be
+    /// signed from `hash.digest(streaming:)` over it. `messageHash` must be a digest
+    /// under `hash`; a wrong-length one is rejected rather than signed.
+    public static func signEd25519(
+        messageHash: Data,
+        seed: Data,
+        publicKey: Data,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> String {
         guard seed.count == 32 else { throw SSHSigError.malformedPublicKey }
         guard publicKey.count == 32 else { throw SSHSigError.malformedPublicKey }
+        try hash.validate(digest: messageHash)
 
-        let signed = SSHSig.signedData(message: message, namespace: namespace, hash: hash)
+        let signed = SSHSig.signedData(messageHash: messageHash, namespace: namespace, hash: hash)
 
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
         let rawSig = try key.signature(for: signed)   // 64 bytes
@@ -67,11 +89,26 @@ public enum SSHSigner {
         namespace: String = SSHSig.defaultNamespace,
         hash: SSHSigHash = .sha512
     ) throws -> String {
+        try signEd25519(
+            messageHash: hash.digest(message),
+            privateMaterial: privateMaterial,
+            namespace: namespace,
+            hash: hash
+        )
+    }
+
+    /// Digest-taking form of the stored-material convenience.
+    public static func signEd25519(
+        messageHash: Data,
+        privateMaterial: Data,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> String {
         guard privateMaterial.count == 64 else { throw SSHSigError.malformedPublicKey }
         let seed = privateMaterial.prefix(32)
         let pub  = privateMaterial.suffix(32)
         return try signEd25519(
-            message: message,
+            messageHash: messageHash,
             seed: Data(seed),
             publicKey: Data(pub),
             namespace: namespace,
@@ -95,7 +132,25 @@ public enum SSHSigner {
         namespace: String = SSHSig.defaultNamespace,
         hash: SSHSigHash = .sha512
     ) throws -> String {
-        let signed = SSHSig.signedData(message: message, namespace: namespace, hash: hash)
+        try signRSA(
+            messageHash: hash.digest(message),
+            privateSecKey: privateSecKey,
+            publicKeyWire: publicKeyWire,
+            namespace: namespace,
+            hash: hash
+        )
+    }
+
+    /// Digest-taking form of `signRSA`. See `signEd25519(messageHash:...)`.
+    public static func signRSA(
+        messageHash: Data,
+        privateSecKey: SecKey,
+        publicKeyWire: Data,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> String {
+        try hash.validate(digest: messageHash)
+        let signed = SSHSig.signedData(messageHash: messageHash, namespace: namespace, hash: hash)
 
         var err: Unmanaged<CFError>?
         guard let rawSig = SecKeyCreateSignature(
@@ -145,10 +200,9 @@ public enum SSHSigner {
     /// key's `x963` public point here. No private key crosses this boundary.
     ///
     /// - Parameters:
-    ///   - rawRS: 64-byte `r || s` over `SSHSig.signedData(message:...)`.
+    ///   - rawRS: 64-byte `r || s` over `SSHSig.signedData(...)`.
     ///   - publicKeyX963: the signer's P-256 public key as `0x04 || X || Y`.
     public static func assembleECDSAP256(
-        message: Data,
         rawRS: Data,
         publicKeyX963: Data,
         namespace: String = SSHSig.defaultNamespace,
@@ -245,10 +299,25 @@ public enum SSHSigner {
         namespace: String = SSHSig.defaultNamespace,
         hash: SSHSigHash = .sha512
     ) throws -> String {
-        let signed = SSHSig.signedData(message: message, namespace: namespace, hash: hash)
+        try signECDSAP256(
+            messageHash: hash.digest(message),
+            privateKey: privateKey,
+            namespace: namespace,
+            hash: hash
+        )
+    }
+
+    /// Digest-taking form of `signECDSAP256`. See `signEd25519(messageHash:...)`.
+    public static func signECDSAP256(
+        messageHash: Data,
+        privateKey: P256.Signing.PrivateKey,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> String {
+        try hash.validate(digest: messageHash)
+        let signed = SSHSig.signedData(messageHash: messageHash, namespace: namespace, hash: hash)
         let sig = try privateKey.signature(for: signed)
         return try assembleECDSAP256(
-            message: message,
             rawRS: sig.rawRepresentation,
             publicKeyX963: privateKey.publicKey.x963Representation,
             namespace: namespace,

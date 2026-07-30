@@ -56,15 +56,21 @@ public enum MigrateService {
             .attributesOfItem(atPath: inputURL.path)[.size] as? NSNumber)??.int64Value ?? 0
 
         // Step 1: decrypt to a temp file.
+        //
+        // A signed bundle stays wrapped. Its signature is over the payload, so
+        // re-encrypting the bundle whole carries the signature into the new file
+        // still valid -- unwrapping here would silently strip it, and a migration
+        // that quietly discards provenance is worse than one that fails.
         let plaintextURL = try FileEncryptor.decrypt(
             inputURL: inputURL,
             identities: identities,
             passphrase: passphrase,
+            unwrapSignedBundle: false,
             progress: { done, total in
                 guard total > 0 else { return }
                 progress?(0.5 * Double(done) / Double(total))
             }
-        )
+        ).url
         // Whatever happens next, the decrypted copy does not outlive this call.
         defer { FileEncryptor.cleanupTempFile(at: plaintextURL) }
 

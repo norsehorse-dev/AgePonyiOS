@@ -17,6 +17,7 @@
 //
 
 import XCTest
+import CryptoKit
 @testable import AgePonyCore
 
 final class SignedBundleTests: XCTestCase {
@@ -381,6 +382,153 @@ final class SSHSigHashStreamTests: XCTestCase {
                     "\(algorithm) differs at \(n) bytes"
                 )
             }
+        }
+    }
+}
+
+// MARK: - Names from an untrusted manifest
+
+/// A bundle's manifest is attacker-controlled, and the decrypt path writes a file
+/// using the name it finds there. These are the shapes that must not survive.
+final class SignedBundleSafeNameTests: XCTestCase {
+
+    func testKeepsAnOrdinaryName() {
+        XCTAssertEqual(SignedBundle.safeFileName("report.pdf"), "report.pdf")
+        XCTAssertEqual(SignedBundle.safeFileName("a b — c.tar.gz"), "a b — c.tar.gz")
+    }
+
+    func testStripsPathTraversal() {
+        XCTAssertEqual(SignedBundle.safeFileName("../../etc/passwd"), "passwd")
+        XCTAssertEqual(SignedBundle.safeFileName("/etc/passwd"), "passwd")
+        XCTAssertEqual(SignedBundle.safeFileName("a/b/c/report.pdf"), "report.pdf")
+    }
+
+    func testRefusesNamesThatAreOnlyTraversal() {
+        for name in ["..", ".", "../..", "/", "", "   ", "a/.."] {
+            XCTAssertEqual(SignedBundle.safeFileName(name), "file", "for \(name.debugDescription)")
+        }
+    }
+
+    func testUsesTheGivenFallback() {
+        XCTAssertEqual(SignedBundle.safeFileName("..", fallback: "payload.bin"), "payload.bin")
+    }
+
+    /// The manifest allows 4 KiB; filesystems allow far less.
+    func testCapsLength() {
+        let long = String(repeating: "x", count: 3000)
+        XCTAssertEqual(SignedBundle.safeFileName(long).count, 200)
+    }
+
+    func testDropsEmbeddedNulAndSurroundingSpace() {
+        XCTAssertEqual(SignedBundle.safeFileName("  report.pdf  "), "report.pdf")
+        XCTAssertEqual(SignedBundle.safeFileName("re\0port.pdf"), "report.pdf")
+    }
+}
+
+// MARK: - The whole sign-then-encrypt round trip
+
+/// What 3.0 actually promises: one encrypted file goes out, and what comes back is
+/// the original payload plus a signature that verifies — with the payload never
+/// held whole at either end.
+final class SignedBundleThroughAgeTests: XCTestCase {
+
+    func testBundleSurvivesEncryptionAndVerifiesFromStreamedDigests() throws {
+        let payload = Data((0..<250_000).map { UInt8(($0 &* 31 &+ 11) % 251) })
+
+        let seed = Data((0..<32).map { UInt8($0 &+ 3) })
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+        let pub = key.publicKey.rawRepresentation
+
+        // Sign the payload from a streamed digest -- as the app does, never
+        // holding the plaintext.
+        let digest = try SSHSigHash.sha512.digest(streaming: InputStream(data: payload))
+        let armored = try SSHSigner.signEd25519(
+            messageHash: digest,
+            privateMaterial: seed + pub
+        )
+
+        // Encrypt the bundle without ever building it.
+        let identity = X25519Identity.generate()
+        let recipient = try X25519Recipient(publicKey: identity.publicKey)
+        let bundle = try SignedBundle.bundleSource(
+            originalName: "quarterly report.pdf",
+            payloadSize: Int64(payload.count),
+            payload: InputStream(data: payload),
+            signatureArmored: armored
+        )
+        let ciphertextOut = OutputStream.toMemory()
+        ciphertextOut.open()
+        try Age.encryptStream(plaintext: bundle, to: [recipient], into: ciphertextOut)
+        ciphertextOut.close()
+        let ciphertext = ciphertextOut.property(forKey: .dataWrittenToMemoryStreamKey) as? Data ?? Data()
+
+        // The declared size has to match what was actually produced, or the tar
+        // header would be a lie and the whole thing would fail to parse.
+        XCTAssertEqual(
+            SignedBundle.sizeOf(
+                originalName: "quarterly report.pdf",
+                payloadSize: Int64(payload.count),
+                signatureArmored: armored
+            ),
+            Int64(try SignedBundle.build(
+                originalName: "quarterly report.pdf",
+                payload: payload,
+                signatureArmored: armored
+            ).count)
+        )
+
+        // Decrypt straight into the unwrapping sink, the way the app does.
+        let plaintextOut = OutputStream.toMemory()
+        plaintextOut.open()
+        let sink = SignedBundleUnwrappingSink(payloadOut: plaintextOut)
+        sink.open()
+        try Age.decryptStream(
+            ciphertext: InputStream(data: ciphertext),
+            identities: [identity],
+            into: sink
+        )
+        try sink.finish()
+        plaintextOut.close()
+
+        let parsed = try XCTUnwrap(try sink.result())
+        XCTAssertEqual(parsed.name, "quarterly report.pdf")
+        XCTAssertEqual(parsed.payloadSize, Int64(payload.count))
+
+        let recovered = plaintextOut.property(forKey: .dataWrittenToMemoryStreamKey) as? Data ?? Data()
+        XCTAssertEqual(recovered, payload)
+
+        // Verified from the digests alone. Nothing re-reads the payload.
+        let v = try SSHSigVerifier.verify(
+            armoredSignature: parsed.signatureArmored,
+            messageHash: { parsed.hash($0) }
+        )
+        XCTAssertEqual(v.publicKeyWire, SSHSig.ed25519PublicKeyWire(pub))
+    }
+
+    /// A plain file is not a bundle, and must come through untouched with no verdict.
+    func testOrdinaryPlaintextPassesThroughUnchanged() throws {
+        let identity = X25519Identity.generate()
+        let recipient = try X25519Recipient(publicKey: identity.publicKey)
+
+        for size in [0, 1, 511, 512, 513, 200_000] {
+            let plaintext = Data((0..<size).map { UInt8($0 % 251) })
+            let ciphertext = try Age.encrypt(plaintext: plaintext, to: [recipient])
+
+            let out = OutputStream.toMemory()
+            out.open()
+            let sink = SignedBundleUnwrappingSink(payloadOut: out)
+            sink.open()
+            try Age.decryptStream(
+                ciphertext: InputStream(data: ciphertext),
+                identities: [identity],
+                into: sink
+            )
+            try sink.finish()
+            out.close()
+
+            XCTAssertNil(try sink.result(), "at \(size) bytes")
+            let recovered = out.property(forKey: .dataWrittenToMemoryStreamKey) as? Data ?? Data()
+            XCTAssertEqual(recovered, plaintext, "at \(size) bytes")
         }
     }
 }

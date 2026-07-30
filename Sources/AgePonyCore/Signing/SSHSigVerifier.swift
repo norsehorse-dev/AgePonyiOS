@@ -87,8 +87,10 @@ public enum SSHSigVerifier {
         let keyType = try SSHSig.publicKeyType(blob.publicKeyWire)
         let (innerType, rawSig) = try SSHSig.parseInnerSignature(blob.signature)
 
+        let digest = try messageHash(blob.hash)
+        try blob.hash.validate(digest: digest)
         let signed = SSHSig.signedData(
-            messageHash: try messageHash(blob.hash),
+            messageHash: digest,
             namespace: blob.namespace,
             hash: blob.hash
         )

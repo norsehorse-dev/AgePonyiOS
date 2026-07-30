@@ -66,18 +66,10 @@ public enum FileVerifier {
         recipients: [StoredRecipient],
         signers: [StoredSigner] = []
     ) -> FileVerificationResult {
-        // Read the signed file.
-        let message: Data
-        do {
-            let scoped = fileURL.startAccessingSecurityScopedResource()
-            defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
-            message = try Data(contentsOf: fileURL)
-        } catch {
-            return FileVerificationResult(
-                trust: .invalid(reason: "Couldn't read the file: \(error.localizedDescription)"),
-                signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
-            )
-        }
+        // Access is held across the whole call: the file is hashed lazily, once
+        // the signature has been parsed and its algorithm is known.
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
 
         // Read the signature text.
         let signatureText: String
@@ -99,12 +91,35 @@ public enum FileVerifier {
             )
         }
 
+        // The file itself is never held: SSHSIG covers only the digest, so it is
+        // streamed past a hasher when the verifier asks for it. A 1 GB file costs
+        // 64 KiB of buffer.
         return verify(
-            message: message,
             signatureText: signatureText,
             identities: identities,
             recipients: recipients,
-            signers: signers
+            signers: signers,
+            messageHash: { try FileSigner.digest(ofFileAt: fileURL, hash: $0) }
+        )
+    }
+
+    /// Verify the signature a decrypted signed bundle carried.
+    ///
+    /// The payload was written out and discarded while the bundle streamed past, so
+    /// there is nothing left to hash -- verification runs entirely on the digests
+    /// the unwrapping sink took on the way through.
+    public static func verify(
+        bundle: SignedBundle.StreamParsed,
+        identities: [StoredIdentity],
+        recipients: [StoredRecipient],
+        signers: [StoredSigner] = []
+    ) -> FileVerificationResult {
+        verify(
+            signatureText: bundle.signatureArmored,
+            identities: identities,
+            recipients: recipients,
+            signers: signers,
+            messageHash: { bundle.hash($0) }
         )
     }
 
@@ -116,12 +131,45 @@ public enum FileVerifier {
         recipients: [StoredRecipient],
         signers: [StoredSigner] = []
     ) -> FileVerificationResult {
+        verify(
+            signatureText: signatureText,
+            identities: identities,
+            recipients: recipients,
+            signers: signers,
+            messageHash: { $0.digest(message) }
+        )
+    }
+
+    /// Verify against a digest supplied on demand rather than the message.
+    ///
+    /// `messageHash` is asked for whichever algorithm the signature names, which
+    /// isn't known until the signature has been parsed. That indirection is what
+    /// lets a file be verified without being held, and lets a signed bundle be
+    /// verified from the digests taken while its payload streamed past.
+    public static func verify(
+        signatureText: String,
+        identities: [StoredIdentity],
+        recipients: [StoredRecipient],
+        signers: [StoredSigner] = [],
+        messageHash: (SSHSigHash) throws -> Data
+    ) -> FileVerificationResult {
         let result: SSHSigVerification
         do {
             result = try SSHSigVerifier.verify(
-                message: message,
                 armoredSignature: signatureText,
-                expectedNamespace: SSHSig.defaultNamespace
+                expectedNamespace: SSHSig.defaultNamespace,
+                messageHash: messageHash
+            )
+        } catch let e as FileSignerError {
+            if case .readFailed(let m) = e {
+                return FileVerificationResult(
+                    trust: .invalid(reason: "Couldn't read the file: \(m)"),
+                    signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
+                )
+            }
+            return FileVerificationResult(
+                trust: .invalid(reason: "Couldn't verify the signature."),
+                signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
             )
         } catch let e as SSHSigError {
             return FileVerificationResult(

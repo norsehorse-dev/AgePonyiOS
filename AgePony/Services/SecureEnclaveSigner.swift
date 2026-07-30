@@ -61,7 +61,27 @@ public enum SecureEnclaveSigner {
     public static func sign(
         message: Data,
         identity: StoredIdentity,
-        namespace: String = SSHSig.defaultNamespace
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> String {
+        try sign(
+            messageHash: hash.digest(message),
+            identity: identity,
+            namespace: namespace,
+            hash: hash
+        )
+    }
+
+    /// Sign a message *digest* with a Secure Enclave identity.
+    ///
+    /// SSHSIG covers only the hash, so the caller can have streamed a file of any
+    /// size past a hasher rather than holding it. The Enclave signs the SSHSIG
+    /// signed-data blob either way; nothing about the hardware path changes.
+    public static func sign(
+        messageHash: Data,
+        identity: StoredIdentity,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
     ) throws -> String {
         let key: SecureEnclave.P256.Signing.PrivateKey
         do {
@@ -72,14 +92,15 @@ public enum SecureEnclaveSigner {
             throw SecureEnclaveSignerError.malformedKeyData
         }
 
-        let signed = SSHSig.signedData(message: message, namespace: namespace, hash: .sha512)
+        try hash.validate(digest: messageHash)
+        let signed = SSHSig.signedData(messageHash: messageHash, namespace: namespace, hash: hash)
         do {
             let sig = try key.signature(for: signed)
             return try SSHSigner.assembleECDSAP256(
-                message: message,
                 rawRS: sig.rawRepresentation,
                 publicKeyX963: key.publicKey.x963Representation,
-                namespace: namespace
+                namespace: namespace,
+                hash: hash
             )
         } catch {
             throw SecureEnclaveSignerError.signFailed(String(describing: error))

@@ -36,6 +36,10 @@ public enum FileEncryptorError: Error, Equatable {
     /// allocation, because the cause is the passphrase's work factor and not
     /// the size of the file.
     case scryptWontFit(String)
+    /// The plaintext announced itself as a signed bundle and then failed to be
+    /// one. Distinct from a decrypt failure: the age layer was fine, so the file
+    /// is readable but its contents are not what they claim.
+    case bundleDamaged(String)
 }
 
 /// Reports progress as `(bytesProcessed, totalBytes)`. `totalBytes` is 0 when the
@@ -66,6 +70,47 @@ public enum FileEncryptor {
         destinationDirectory: URL? = nil,
         progress: FileProgressHandler? = nil
     ) throws -> URL {
+        let scoped = inputURL.startAccessingSecurityScopedResource()
+        defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
+
+        guard let rawInput = InputStream(url: inputURL) else {
+            throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)
+        }
+
+        return try encrypt(
+            source: rawInput,
+            totalBytes: fileSize(of: inputURL),
+            outputName: inputURL.lastPathComponent + ".age",
+            recipients: recipients,
+            passphrase: passphrase,
+            armor: armor,
+            workFactor: workFactor,
+            destinationDirectory: destinationDirectory,
+            progress: progress
+        )
+    }
+
+    /// Encrypt whatever `source` yields into a `.age` file named `outputName`.
+    ///
+    /// The one implementation of "encrypt a stream to a file". A single file, a tar
+    /// assembled on the fly, and a signed bundle differ only in what they pull from
+    /// -- so the scrypt guard, the armor branch, and the file-protection step live
+    /// here once rather than in each caller.
+    ///
+    /// `totalBytes` is what `progress` reports against; pass 0 when it isn't known.
+    /// `source` is opened here and closed on the way out; the caller keeps whatever
+    /// security-scoped access the source needs alive across the call.
+    public static func encrypt(
+        source: InputStream,
+        totalBytes: Int64,
+        outputName: String,
+        recipients: [any AgeRecipient],
+        passphrase: String?,
+        armor: Bool,
+        workFactor: Int = mobileWorkFactor,
+        destinationDirectory: URL? = nil,
+        progress: FileProgressHandler? = nil
+    ) throws -> URL {
         let usingPassphrase = (passphrase?.isEmpty == false)
         if !usingPassphrase && recipients.isEmpty {
             throw FileEncryptorError.noRecipients
@@ -79,22 +124,18 @@ public enum FileEncryptor {
             throw FileEncryptorError.scryptWontFit(reason)
         }
 
-        let scoped = inputURL.startAccessingSecurityScopedResource()
-        defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
+        // A directory we made is ours to remove on failure. A directory handed to
+        // us belongs to a batch, and removing it would take the siblings that
+        // already succeeded -- so there, only the partial output goes.
+        let ownsDirectory = (destinationDirectory == nil)
+        let outURL = try destinationDirectory.map { $0.appendingPathComponent(outputName) }
+            ?? freshTempURL(named: outputName)
 
-        let total = fileSize(of: inputURL)
-        let outName = inputURL.lastPathComponent + ".age"
-        let outURL = try destinationDirectory.map { $0.appendingPathComponent(outName) }
-            ?? freshTempURL(named: outName)
-
-        guard let rawInput = InputStream(url: inputURL) else {
-            throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)
-        }
         guard let output = OutputStream(url: outURL, append: false) else {
             throw FileEncryptorError.cannotOpenOutput(outURL.lastPathComponent)
         }
 
-        let input = ProgressInputStream(rawInput, total: total, report: progress)
+        let input = ProgressInputStream(source, total: totalBytes, report: progress)
         input.open()
         output.open()
         defer { input.close(); output.close() }
@@ -113,7 +154,11 @@ public enum FileEncryptor {
                 try Age.encryptStream(plaintext: input, to: targets, into: output)
             }
         } catch {
-            cleanupTempFile(at: outURL)
+            if ownsDirectory {
+                cleanupTempFile(at: outURL)
+            } else {
+                try? FileManager.default.removeItem(at: outURL)
+            }
             throw FileEncryptorError.ageError(String(describing: error))
         }
 
@@ -123,18 +168,39 @@ public enum FileEncryptor {
 
     // MARK: - Decrypt (streaming)
 
+    /// What came out of a decrypt.
+    public struct DecryptOutcome {
+        /// The plaintext on disk. For a signed bundle this is the payload alone,
+        /// under the name the bundle recorded, with the wrapper already stripped.
+        public let url: URL
+        /// Present when the plaintext turned out to be a signed bundle. Carries the
+        /// signature and the digests taken while the payload streamed past, which is
+        /// everything verification needs -- the payload itself is gone by then.
+        public let signedBundle: SignedBundle.StreamParsed?
+
+        public var isSigned: Bool { signedBundle != nil }
+    }
+
     /// Decrypt `inputURL` to a temp file, streaming throughout.
     ///
     /// Handles armored and binary input transparently: the first bytes are sniffed
     /// and, if armored, the file is de-armored on the fly rather than decoded whole.
     ///
     /// Supply either `identities` or `passphrase`.
+    ///
+    /// With `unwrapSignedBundle` (the default), plaintext that turns out to be a
+    /// signed bundle has its wrapper stripped as it streams and the outcome carries
+    /// what verification needs. Anything else passes through byte for byte, so a
+    /// plain file and a 2.0-era file are unaffected. Pass `false` to keep the bundle
+    /// intact -- re-encrypting wants that, since rewrapping the same bundle for new
+    /// recipients preserves a signature that unwrapping would throw away.
     public static func decrypt(
         inputURL: URL,
         identities: [any AgeIdentity],
         passphrase: String?,
+        unwrapSignedBundle: Bool = true,
         progress: FileProgressHandler? = nil
-    ) throws -> URL {
+    ) throws -> DecryptOutcome {
         let scoped = inputURL.startAccessingSecurityScopedResource()
         defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
 
@@ -163,8 +229,16 @@ public enum FileEncryptor {
             ? [ScryptIdentity(passphrase: passphrase ?? "")]
             : identities
 
+        // Whether the plaintext is a bundle is not knowable until its first block
+        // has arrived, so the decision is made mid-stream by the sink rather than
+        // by anything here.
+        let unwrapper = unwrapSignedBundle ? SignedBundleUnwrappingSink(payloadOut: output) : nil
+        unwrapper?.open()
+        let destination: OutputStream = unwrapper ?? output
+
         do {
-            try Age.decryptStream(ciphertext: source, identities: readers, into: output)
+            try Age.decryptStream(ciphertext: source, identities: readers, into: destination)
+            try unwrapper?.finish()
         } catch {
             cleanupTempFile(at: outURL)
             // An armor problem surfaces through the decoding source rather than as a
@@ -175,8 +249,34 @@ public enum FileEncryptor {
             throw FileEncryptorError.ageError(String(describing: error))
         }
 
+        let parsed: SignedBundle.StreamParsed?
+        do {
+            parsed = try unwrapper?.result()
+        } catch {
+            // The marker was there and the rest was not. The age layer succeeded, so
+            // this is not a decrypt failure -- say so, rather than leaving the user
+            // with a half-written file and a misleading message.
+            cleanupTempFile(at: outURL)
+            throw FileEncryptorError.bundleDamaged(String(describing: error))
+        }
+
         try protectFile(at: outURL)
-        return outURL
+
+        // A bundle knows what the file was called before it was wrapped, which beats
+        // the name derived from stripping `.age`. Best effort: a rename that fails
+        // costs a worse filename, not the file.
+        var finalURL = outURL
+        if let parsed {
+            let safe = SignedBundle.safeFileName(parsed.name, fallback: outURL.lastPathComponent)
+            let desired = outURL.deletingLastPathComponent().appendingPathComponent(safe)
+            if desired != outURL,
+               !FileManager.default.fileExists(atPath: desired.path),
+               (try? FileManager.default.moveItem(at: outURL, to: desired)) != nil {
+                finalURL = desired
+            }
+        }
+
+        return DecryptOutcome(url: finalURL, signedBundle: parsed)
     }
 
     // MARK: - Multi-file
@@ -208,15 +308,6 @@ public enum FileEncryptor {
     ) throws -> URL {
         guard !inputURLs.isEmpty else { throw FileEncryptorError.noRecipients }
 
-        let usingPassphrase = (passphrase?.isEmpty == false)
-        if !usingPassphrase && recipients.isEmpty { throw FileEncryptorError.noRecipients }
-        if usingPassphrase && !recipients.isEmpty {
-            throw FileEncryptorError.scryptCannotMixWithRecipients
-        }
-        if usingPassphrase, let reason = ScryptMemory.blockingReason(workFactor: workFactor) {
-            throw FileEncryptorError.scryptWontFit(reason)
-        }
-
         // Hold security-scoped access for every input across the whole read.
         // Entries are opened lazily, so access has to outlive the call rather
         // than each individual open.
@@ -234,12 +325,6 @@ public enum FileEncryptor {
         }
 
         let archiveBytes = TarArchive.sizeOf(entries)
-        let outURL = try freshTempURL(named: archiveName + ".age")
-
-        guard let output = OutputStream(url: outURL, append: false) else {
-            throw FileEncryptorError.cannotOpenOutput(outURL.lastPathComponent)
-        }
-
         let tar: InputStream
         do {
             tar = try TarArchive.source(entries)
@@ -247,30 +332,16 @@ public enum FileEncryptor {
             throw FileEncryptorError.ageError(String(describing: error))
         }
 
-        let counted = ProgressInputStream(tar, total: archiveBytes, report: progress)
-        counted.open()
-        output.open()
-        defer { counted.close(); output.close() }
-
-        let targets: [any AgeRecipient] = usingPassphrase
-            ? [ScryptRecipient(passphrase: passphrase ?? "", workFactor: workFactor)]
-            : recipients
-
-        do {
-            if armor {
-                let sink = try AgeArmor.EncodingSink(output)
-                try Age.encryptStream(plaintext: counted, to: targets, into: sink)
-                try sink.finish()
-            } else {
-                try Age.encryptStream(plaintext: counted, to: targets, into: output)
-            }
-        } catch {
-            cleanupTempFile(at: outURL)
-            throw FileEncryptorError.ageError(String(describing: error))
-        }
-
-        try protectFile(at: outURL)
-        return outURL
+        return try encrypt(
+            source: tar,
+            totalBytes: archiveBytes,
+            outputName: archiveName + ".age",
+            recipients: recipients,
+            passphrase: passphrase,
+            armor: armor,
+            workFactor: workFactor,
+            progress: progress
+        )
     }
 
     /// Write a tar of `inputURLs` to a temp file, streaming.

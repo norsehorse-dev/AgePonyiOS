@@ -40,7 +40,9 @@ struct EncryptFlow: View {
     @State private var resultURL: URL?
     @State private var signEnabled: Bool = false
     @State private var signingIdentityID: UUID?
-    @State private var signatureURL: URL?
+    /// Whether the single output carries a signature sealed inside it. There is
+    /// no second file to track any more -- 3.0 signs then encrypts.
+    @State private var outputIsSigned: Bool = false
 
     @State private var showFilePicker: Bool = false
     @State private var showRecipientPicker: Bool = false
@@ -388,23 +390,16 @@ struct EncryptFlow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            if let sig = signatureURL {
-                Text("+ " + sig.lastPathComponent)
-                    .font(AgePonyTypography.monoCaption)
+            if outputIsSigned {
+                Text("Signed. The signature is sealed inside the file, so the ciphertext gives nothing away — whoever decrypts it sees who sent it.")
+                    .font(AgePonyTypography.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
             }
             Spacer()
             VStack(spacing: 12) {
-                if let age = resultURL, let sig = signatureURL {
-                    ShareLink(items: [age, sig]) {
-                        Text("Share file + signature")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.agePonyPrimary)
-                }
-                if let url = resultURL, signatureURL == nil {
+                if let url = resultURL {
                     ShareLink(item: url) {
                         Text("Share encrypted file")
                             .frame(maxWidth: .infinity)
@@ -660,24 +655,38 @@ struct EncryptFlow: View {
     }
 
     private func runSignedEncrypt() {
-        guard let url = signableInput(),
+        guard let source = signableInput(),
               let id = signingIdentityID,
               let identity = signingIdentities.first(where: { $0.id == id }) else { return }
 
         if vault.biometricEnabled {
             Task {
                 do {
-                    try await BiometricGate.authenticate(reason: "Sign \"\(url.lastPathComponent)\" with your private key.")
-                    performSignedEncrypt(url: url, identity: identity)
+                    try await BiometricGate.authenticate(reason: "Sign \"\(source.url.lastPathComponent)\" with your private key.")
+                    performSignedEncrypt(source: source, identity: identity)
                 } catch BiometricGateError.userCancelled {
-                    // Stay on the configure screen.
+                    // Stay on the configure screen -- but the staged archive, if
+                    // there was one, does not outlive the cancellation.
+                    discardIfTemporary(source)
                 } catch {
+                    discardIfTemporary(source)
                     errorMessage = error.localizedDescription
                 }
             }
         } else {
-            performSignedEncrypt(url: url, identity: identity)
+            performSignedEncrypt(source: source, identity: identity)
         }
+    }
+
+    private func discardIfTemporary(_ source: SignableInput) {
+        if source.isTemporary { FileEncryptor.cleanupTempFile(at: source.url) }
+    }
+
+    /// What a signature would cover, and whether we made it.
+    struct SignableInput {
+        let url: URL
+        /// True when this is a tar we staged and must therefore delete again.
+        let isTemporary: Bool
     }
 
     /// The single file a signature would cover.
@@ -686,18 +695,21 @@ struct EncryptFlow: View {
     /// exist, so it is streamed to a temp file here -- bounded memory, costing
     /// only disk. Separate-files mode has no single output and is gated out of
     /// signing before this is reached.
-    private func signableInput() -> URL? {
-        if inputs.count == 1 { return inputs[0] }
+    private func signableInput() -> SignableInput? {
+        if inputs.count == 1 { return SignableInput(url: inputs[0], isTemporary: false) }
         guard multiMode == .archive, !inputs.isEmpty else { return nil }
         do {
-            return try FileEncryptor.buildArchiveFile(inputURLs: inputs)
+            return SignableInput(
+                url: try FileEncryptor.buildArchiveFile(inputURLs: inputs),
+                isTemporary: true
+            )
         } catch {
             errorMessage = describe(error)
             return nil
         }
     }
 
-    private func performSignedEncrypt(url: URL, identity: StoredIdentity) {
+    private func performSignedEncrypt(source: SignableInput, identity: StoredIdentity) {
         stage = .encrypting
         working = true
         progressFraction = nil
@@ -705,19 +717,33 @@ struct EncryptFlow: View {
         let recipientsSnapshot = recipients
         let passphraseSnapshot = passphrase
         let armorSnapshot = armor
+        let workFactorSnapshot = vault.scryptWorkFactor
+        let url = source.url
+        let isTemporary = source.isTemporary
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // A staged tar is an implementation detail of signing several files
+            // at once; it goes whether the encrypt succeeded or not.
+            defer { if isTemporary { FileEncryptor.cleanupTempFile(at: url) } }
             do {
+                let onProgress: FileProgressHandler = { done, total in
+                    guard total > 0 else { return }
+                    let fraction = Double(done) / Double(total)
+                    DispatchQueue.main.async { progressFraction = fraction }
+                }
+
                 let out = try SignEncryptService.signEncrypt(
                     inputURL: url,
                     recipients: recipientsSnapshot,
                     passphrase: passphraseSnapshot,
                     armor: armorSnapshot,
-                    signingIdentity: identity
+                    signingIdentity: identity,
+                    workFactor: workFactorSnapshot,
+                    progress: onProgress
                 )
                 DispatchQueue.main.async {
                     resultURL = out.encryptedURL
-                    signatureURL = out.signatureURL
+                    outputIsSigned = true
                     stage = .done
                     working = false
                 }
@@ -735,7 +761,7 @@ struct EncryptFlow: View {
     private func resetForAnother() {
         cleanupOutputs()
         resultURL = nil
-        signatureURL = nil
+        outputIsSigned = false
         inputs = []
         sourceSize = 0
         multiMode = .archive
@@ -777,6 +803,7 @@ struct EncryptFlow: View {
             case .cannotOpenInput(let name):   return "Couldn't open \(name) for reading."
             case .cannotOpenOutput(let name):  return "Couldn't create \(name)."
             case .scryptWontFit(let reason):   return reason
+            case .bundleDamaged(let m):        return "The signed bundle is damaged: \(m)"
             }
         }
         if let e = error as? FileSignerError {
@@ -793,7 +820,8 @@ struct EncryptFlow: View {
         if let e = error as? SignEncryptError {
             switch e {
             case .signingIdentityCannotSign: return "The chosen identity can't sign."
-            case .relocateFailed(let m):     return "Couldn't finalize the signature: \(m)"
+            case .requiresSecurityKey:       return "That identity signs with your security key, which sign-and-encrypt doesn't offer yet."
+            case .cannotOpenInput(let name): return "Couldn't open \(name) for reading."
             }
         }
         return error.localizedDescription

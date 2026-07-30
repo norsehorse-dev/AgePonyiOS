@@ -7,8 +7,16 @@
 //  shape: read the source, run the crypto from AgePonyCore, write the result
 //  to a fresh temp dir, and return the URL for a ShareLink.
 //
-//  Supports SSH Ed25519 (C0), SSH RSA / rsa-sha2-512 (D0), and Secure Enclave
-//  ecdsa-sha2-nistp256 (E0). X25519 keys are encryption-only and can't sign.
+//  Supports SSH Ed25519 (C0), SSH RSA / rsa-sha2-512 (D0), Secure Enclave
+//  ecdsa-sha2-nistp256 (E0), and FIDO security keys over NFC. X25519 and
+//  post-quantum keys are encryption-only and can't sign.
+//
+//  The file is never held in memory. SSHSIG covers only the message *digest*,
+//  so signing streams the file past a hasher and signs the digest — the same
+//  bounded-memory rule the rest of 3.1 follows. `armoredSignature(messageHash:)`
+//  is the seam: it takes a digest from anywhere, which is what lets sign-and-
+//  encrypt sign a plaintext it is about to stream into a signed bundle rather
+//  than reading it twice into RAM.
 //
 
 import Foundation
@@ -26,100 +34,147 @@ public enum FileSignerError: Error, Equatable {
 
 public enum FileSigner {
 
-    /// Sign the bytes of `inputURL` with `identity`, writing an armored
-    /// detached signature named `<original>.sig`.
-    public static func sign(
-        inputURL: URL,
-        identity: StoredIdentity,
-        namespace: String = SSHSig.defaultNamespace
-    ) throws -> URL {
-        guard identity.canSign else { throw FileSignerError.identityCannotSign }
+    // MARK: - Digest
 
-        let scoped = inputURL.startAccessingSecurityScopedResource()
-        defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
+    /// SSHSIG digest of a file, streamed 64 KiB at a time.
+    ///
+    /// Takes security-scoped access for the duration, so callers that already hold
+    /// it pay nothing and callers that don't are still correct.
+    public static func digest(
+        ofFileAt url: URL,
+        hash: SSHSigHash = .sha512
+    ) throws -> Data {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 
-        let message: Data
+        guard let stream = InputStream(url: url) else {
+            throw FileSignerError.readFailed(url.lastPathComponent)
+        }
+        stream.open()
+        defer { stream.close() }
         do {
-            message = try Data(contentsOf: inputURL)
+            return try hash.digest(streaming: stream)
         } catch {
             throw FileSignerError.readFailed(error.localizedDescription)
         }
+    }
 
-        let armored: String
+    // MARK: - Signing a digest
+
+    /// Produce an armored SSHSIG over `messageHash` with `identity`.
+    ///
+    /// The signing seam. Everything that signs in-process goes through here, and
+    /// nothing here knows or cares where the digest came from — a file streamed
+    /// past a hasher, a payload about to be sealed into a bundle, or a short
+    /// string held in memory.
+    ///
+    /// Security-key identities are rejected: they sign over NFC, which is async.
+    /// Use `armoredSignatureWithSecurityKey(messageHash:...)`.
+    public static func armoredSignature(
+        messageHash: Data,
+        identity: StoredIdentity,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> String {
+        guard identity.canSign else { throw FileSignerError.identityCannotSign }
+
         switch identity.type {
         case .sshEd25519:
             guard identity.privateKeyMaterial.count == 64 else {
                 throw FileSignerError.malformedIdentityMaterial
             }
             do {
-                armored = try SSHSigner.signEd25519(
-                    message: message,
+                return try SSHSigner.signEd25519(
+                    messageHash: messageHash,
                     privateMaterial: identity.privateKeyMaterial,
-                    namespace: namespace
+                    namespace: namespace,
+                    hash: hash
                 )
             } catch {
                 throw FileSignerError.signError(String(describing: error))
             }
+
         case .sshRSA:
             guard let pem = String(data: identity.privateKeyMaterial, encoding: .utf8) else {
                 throw FileSignerError.malformedIdentityMaterial
             }
             do {
                 let rsaIdentity = try SSHRSAIdentity(openSSHPrivateKey: pem)
-                armored = try SSHSigner.signRSA(
-                    message: message,
+                return try SSHSigner.signRSA(
+                    messageHash: messageHash,
                     privateSecKey: rsaIdentity.privateSecKey,
                     publicKeyWire: rsaIdentity.wireBlob,
-                    namespace: namespace
+                    namespace: namespace,
+                    hash: hash
                 )
             } catch {
                 throw FileSignerError.signError(String(describing: error))
             }
+
         case .secureEnclaveP256:
             do {
-                armored = try SecureEnclaveSigner.sign(
-                    message: message,
+                return try SecureEnclaveSigner.sign(
+                    messageHash: messageHash,
                     identity: identity,
-                    namespace: namespace
+                    namespace: namespace,
+                    hash: hash
                 )
             } catch {
                 throw FileSignerError.signError(String(describing: error))
             }
+
         case .skEd25519, .skEcdsaP256:
             // Security keys sign over NFC, which is async. Callers must route
-            // these through signWithSecurityKey(...) instead.
+            // these through the security-key entry points instead.
             throw FileSignerError.requiresSecurityKey
+
         case .x25519, .postQuantum:
             // Both are encryption-only. ML-KEM is a KEM, not a signature scheme.
             throw FileSignerError.identityCannotSign
         }
+    }
+
+    // MARK: - Signing a file
+
+    /// Sign the bytes of `inputURL` with `identity`, writing an armored
+    /// detached signature named `<original>.sig`.
+    public static func sign(
+        inputURL: URL,
+        identity: StoredIdentity,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) throws -> URL {
+        guard identity.canSign else { throw FileSignerError.identityCannotSign }
+
+        let armored = try armoredSignature(
+            messageHash: try digest(ofFileAt: inputURL, hash: hash),
+            identity: identity,
+            namespace: namespace,
+            hash: hash
+        )
 
         let outName = inputURL.lastPathComponent + ".sig"
         return try writeToFreshTempDir(name: outName, bytes: Data(armored.utf8))
     }
 
 #if canImport(CoreNFC)
-    /// Sign the bytes of `inputURL` with an external FIDO security-key identity
-    /// (sk-ssh-ed25519 / sk-ecdsa-sha2-nistp256), tapping the key over NFC.
-    /// Separate from `sign(...)` because the NFC round-trip is asynchronous.
+
+    /// Produce an armored SSHSIG over `messageHash` with an external FIDO
+    /// security-key identity (sk-ssh-ed25519 / sk-ecdsa-sha2-nistp256), tapping
+    /// the key over NFC. Separate from `armoredSignature(messageHash:...)`
+    /// because the NFC round-trip is asynchronous.
+    ///
+    /// PIN-related `SecurityKeyError`s are rethrown untouched so the UI can
+    /// prompt and retry rather than showing a dead end.
     @available(iOS 13.0, *)
-    public static func signWithSecurityKey(
-        inputURL: URL,
+    public static func armoredSignatureWithSecurityKey(
+        messageHash: Data,
         identity: StoredIdentity,
         pin: String? = nil,
-        namespace: String = SSHSig.defaultNamespace
-    ) async throws -> URL {
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) async throws -> String {
         guard identity.isSecurityKey else { throw FileSignerError.identityCannotSign }
-
-        let scoped = inputURL.startAccessingSecurityScopedResource()
-        defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
-
-        let message: Data
-        do {
-            message = try Data(contentsOf: inputURL)
-        } catch {
-            throw FileSignerError.readFailed(error.localizedDescription)
-        }
 
         // Recover (algorithm, public key, application) from the stored sk wire
         // blob; the credentialId is held in privateKeyMaterial.
@@ -148,15 +203,15 @@ public enum FileSigner {
             throw FileSignerError.malformedIdentityMaterial
         }
 
-        let armored: String
         do {
-            armored = try await SecurityKeyService.signSSHSIG(
-                message: message,
+            return try await SecurityKeyService.signSSHSIG(
+                messageHash: messageHash,
                 credentialId: credentialId,
                 algorithm: algorithm,
                 publicKey: publicKey,
                 application: application,
                 namespace: namespace,
+                hash: hash,
                 pin: pin
             )
         } catch let e as SecurityKeyError where e.indicatesPinRequired || e.indicatesWrongPin {
@@ -167,6 +222,31 @@ public enum FileSigner {
                 (error as? LocalizedError)?.errorDescription ?? String(describing: error)
             )
         }
+    }
+
+    /// Sign the bytes of `inputURL` with an external FIDO security-key identity,
+    /// tapping the key over NFC.
+    @available(iOS 13.0, *)
+    public static func signWithSecurityKey(
+        inputURL: URL,
+        identity: StoredIdentity,
+        pin: String? = nil,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512
+    ) async throws -> URL {
+        guard identity.isSecurityKey else { throw FileSignerError.identityCannotSign }
+
+        // Hash before the tap, so the user isn't holding a key to the phone
+        // while a large file is read.
+        let messageHash = try digest(ofFileAt: inputURL, hash: hash)
+
+        let armored = try await armoredSignatureWithSecurityKey(
+            messageHash: messageHash,
+            identity: identity,
+            pin: pin,
+            namespace: namespace,
+            hash: hash
+        )
 
         let outName = inputURL.lastPathComponent + ".sig"
         return try writeToFreshTempDir(name: outName, bytes: Data(armored.utf8))

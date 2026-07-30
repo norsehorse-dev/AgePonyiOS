@@ -96,7 +96,38 @@ public enum SecurityKeyService {
         pin: String? = nil,
         alertMessage: String = "Hold your security key to sign."
     ) async throws -> String {
-        let signedData = SSHSig.signedData(message: message, namespace: namespace, hash: hash)
+        try await signSSHSIG(
+            messageHash: hash.digest(message),
+            credentialId: credentialId,
+            algorithm: algorithm,
+            publicKey: publicKey,
+            application: application,
+            namespace: namespace,
+            hash: hash,
+            pin: pin,
+            alertMessage: alertMessage
+        )
+    }
+
+    /// Digest-taking form of `signSSHSIG`.
+    ///
+    /// The authenticator is handed SHA-256 of the SSHSIG signed-data blob, and that
+    /// blob contains only the message hash -- so a file that was streamed past a
+    /// hasher signs exactly as one held in memory does. This is what lets a large
+    /// file be signed with a security key on a phone.
+    public static func signSSHSIG(
+        messageHash: Data,
+        credentialId: Data,
+        algorithm: SecurityKeyAlgorithm,
+        publicKey: Data,
+        application: Data = SecurityKeyService.application,
+        namespace: String = SSHSig.defaultNamespace,
+        hash: SSHSigHash = .sha512,
+        pin: String? = nil,
+        alertMessage: String = "Hold your security key to sign."
+    ) async throws -> String {
+        try hash.validate(digest: messageHash)
+        let signedData = SSHSig.signedData(messageHash: messageHash, namespace: namespace, hash: hash)
         let clientDataHash = Data(SHA256.hash(data: signedData))
 
         let assertion = try await SecurityKeyTransport.run(alertMessage: alertMessage) { channel in

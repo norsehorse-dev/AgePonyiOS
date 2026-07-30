@@ -54,29 +54,9 @@ struct VerifiedBadge: View {
 
     // MARK: - State mapping
 
-    private var iconName: String {
-        switch result.trust {
-        case .trusted:         return "checkmark.seal.fill"
-        case .validUnknownKey: return "checkmark.shield"
-        case .invalid:         return "xmark.seal.fill"
-        }
-    }
-
-    private var tint: Color {
-        switch result.trust {
-        case .trusted:         return AgePonyColors.tealCore
-        case .validUnknownKey: return .orange
-        case .invalid:         return AgePonyColors.destructive
-        }
-    }
-
-    private var title: String {
-        switch result.trust {
-        case .trusted:         return "Verified"
-        case .validUnknownKey: return "Valid, unknown signer"
-        case .invalid:         return "Not verified"
-        }
-    }
+    private var iconName: String { result.trust.iconName }
+    private var tint: Color { result.trust.tint }
+    private var title: String { result.trust.title }
 
     private var subtitle: String {
         switch result.trust {
@@ -96,5 +76,78 @@ struct VerifiedBadge: View {
         case .invalid: return nil
         default:       return result.signerFingerprint
         }
+    }
+}
+
+// MARK: - Shared mapping
+
+/// One place where a trust outcome becomes an icon, a colour and a word.
+///
+/// Two screens show signatures now -- the standalone verify flow, and decrypt,
+/// where a signed bundle's verdict appears alongside the decrypted file. They must
+/// not be able to drift into disagreeing about what red means.
+extension SignatureTrust {
+    var iconName: String {
+        switch self {
+        case .trusted:         return "checkmark.seal.fill"
+        case .validUnknownKey: return "checkmark.shield"
+        case .invalid:         return "xmark.seal.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .trusted:         return AgePonyColors.tealCore
+        case .validUnknownKey: return .orange
+        case .invalid:         return AgePonyColors.destructive
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .trusted:         return "Verified"
+        case .validUnknownKey: return "Valid, unknown signer"
+        case .invalid:         return "Not verified"
+        }
+    }
+
+    /// One line, for use beside something else rather than as the headline.
+    var summaryLine: String {
+        switch self {
+        case .trusted(let name, let isOwn):
+            return isOwn ? "Signed by you (\(name))" : "Signed by \(name)"
+        case .validUnknownKey:
+            return "Signed, but by a key you don't know"
+        case .invalid:
+            return "Signature didn't check out"
+        }
+    }
+}
+
+/// A one-line signature verdict, for screens whose headline is something else.
+struct CompactVerifiedBadge: View {
+
+    let result: FileVerificationResult
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Label(result.trust.summaryLine, systemImage: result.trust.iconName)
+                .font(AgePonyTypography.footnote)
+                .foregroundStyle(result.trust.tint)
+                .multilineTextAlignment(.center)
+            if case .invalid(let reason) = result.trust {
+                Text(reason)
+                    .font(AgePonyTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else if let fingerprint = result.signerFingerprint {
+                Text(fingerprint)
+                    .font(AgePonyTypography.monoCaption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.horizontal, 32)
     }
 }

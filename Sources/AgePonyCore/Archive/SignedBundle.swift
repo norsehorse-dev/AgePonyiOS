@@ -201,6 +201,26 @@ public enum SignedBundle {
         return found
     }
 
+    /// The manifest's name reduced to something safe to write to disk.
+    ///
+    /// A bundle is attacker-controlled input. Nothing stops a hand-built one from
+    /// naming its payload `../../../somewhere/else`, and the decrypt path uses this
+    /// name for the file it writes -- so only the last path component survives, and
+    /// the traversal spellings are refused outright. The write side never produces
+    /// such a name; that is exactly why the read side cannot assume it.
+    ///
+    /// Also length-capped: the manifest allows 4 KiB, most filesystems allow 255
+    /// bytes, and the difference is a write that fails for a reason no user could
+    /// interpret.
+    public static func safeFileName(_ name: String, fallback: String = "file") -> String {
+        let last = name.split(separator: "/").last.map(String.init) ?? ""
+        let cleaned = last
+            .replacingOccurrences(of: "\0", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, cleaned != ".", cleaned != ".." else { return fallback }
+        return String(cleaned.prefix(200))
+    }
+
     static func sanitize(_ name: String) -> String {
         let cleaned = name
             .replacingOccurrences(of: "\n", with: "_")
