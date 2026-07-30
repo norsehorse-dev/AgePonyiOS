@@ -333,7 +333,7 @@ struct RecipientPickerView: View {
                 type: candidate.type,
                 publicKeyMaterial: candidate.publicKeyMaterial,
                 sshComment: candidate.sshComment,
-                source: candidate.type == .x25519 ? .pasteAge : .pasteSSH,
+                source: candidate.type.pastedSource,
                 sourceMetadata: nil
             )
             let recipient = try stored.toAgeRecipient()

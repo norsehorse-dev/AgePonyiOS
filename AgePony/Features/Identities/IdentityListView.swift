@@ -72,19 +72,16 @@ struct IdentityListView: View {
         }
     }
 
+    /// Every type the vault can hold gets a section, in declaration order.
+    ///
+    /// Driven by `allCases` rather than a list written out here, because a list
+    /// written out here is how post-quantum identities came to be saved and then
+    /// never shown.
     private var groupedSections: [(title: String, items: [StoredIdentity])] {
         let groups = Dictionary(grouping: vault.identities, by: { $0.type })
-        let order: [(StoredIdentityType, String)] = [
-            (.x25519,    "age X25519"),
-            (.sshEd25519, "SSH Ed25519"),
-            (.sshRSA,    "SSH RSA"),
-            (.secureEnclaveP256, "Secure Enclave (P-256)"),
-            (.skEd25519, "Security Key (Ed25519)"),
-            (.skEcdsaP256, "Security Key (P-256)")
-        ]
-        return order.compactMap { (type, title) in
+        return StoredIdentityType.allCases.compactMap { type in
             guard let items = groups[type], !items.isEmpty else { return nil }
-            return (title, items.sorted { $0.createdAt < $1.createdAt })
+            return (type.sectionTitle, items.sorted { $0.createdAt < $1.createdAt })
         }
     }
 }

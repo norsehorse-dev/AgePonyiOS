@@ -16,16 +16,37 @@ import AgePonyCore
 
 // MARK: - Identity
 
-public enum StoredIdentityType: String, Codable, Hashable {
+/// The kinds of identity the vault can hold.
+///
+/// `CaseIterable`, and **declaration order is display order**. The identity list
+/// used to walk a hand-written array of types instead, which meant adding a case
+/// here dropped those identities off the screen entirely -- generated, saved and
+/// persisted, but invisible, which reads to a user as "it didn't save". An array
+/// literal is a switch the compiler cannot check. Nothing enumerates these by hand
+/// any more; add a case and it appears.
+public enum StoredIdentityType: String, Codable, Hashable, CaseIterable {
     case x25519
+    /// MLKEM768-X25519 hybrid. Private material is the 32-byte seed; the
+    /// public half is derived from it deterministically.
+    case postQuantum
     case sshEd25519
     case sshRSA
     case secureEnclaveP256
     case skEd25519
     case skEcdsaP256
-    /// MLKEM768-X25519 hybrid. Private material is the 32-byte seed; the
-    /// public half is derived from it deterministically.
-    case postQuantum
+
+    /// Section heading for a group of these. A switch, so it cannot go stale.
+    public var sectionTitle: String {
+        switch self {
+        case .x25519:            return "age X25519"
+        case .postQuantum:       return "Post-quantum hybrid"
+        case .sshEd25519:        return "SSH Ed25519"
+        case .sshRSA:            return "SSH RSA"
+        case .secureEnclaveP256: return "Secure Enclave (P-256)"
+        case .skEd25519:         return "Security Key (Ed25519)"
+        case .skEcdsaP256:       return "Security Key (P-256)"
+        }
+    }
 }
 
 public struct StoredIdentity: Codable, Identifiable, Hashable {
@@ -263,12 +284,34 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
 
 // MARK: - Recipient (stubbed for 1c; full surface added in 1e)
 
-public enum StoredRecipientType: String, Codable, Hashable {
+public enum StoredRecipientType: String, Codable, Hashable, CaseIterable {
     case x25519
-    case sshEd25519
-    case sshRSA
     /// MLKEM768-X25519 hybrid, an `age1pq1…` recipient.
     case postQuantum
+    case sshEd25519
+    case sshRSA
+
+    /// Section heading for a group of these. See `StoredIdentityType`.
+    public var sectionTitle: String {
+        switch self {
+        case .x25519:     return "age X25519"
+        case .postQuantum: return "Post-quantum hybrid"
+        case .sshEd25519: return "SSH Ed25519"
+        case .sshRSA:     return "SSH RSA"
+        }
+    }
+
+    /// Where a pasted recipient of this type came from.
+    ///
+    /// A post-quantum recipient is an age-style bech32 string, not an SSH line, so
+    /// `x25519 ? age : ssh` gets it wrong -- which is what the picker was doing.
+    /// One switch, used by every paste path.
+    public var pastedSource: StoredRecipientSource {
+        switch self {
+        case .x25519, .postQuantum: return .pasteAge
+        case .sshEd25519, .sshRSA:  return .pasteSSH
+        }
+    }
 }
 
 public enum StoredRecipientSource: String, Codable, Hashable {

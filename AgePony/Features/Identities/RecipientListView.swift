@@ -54,16 +54,13 @@ struct RecipientListView: View {
         }
     }
 
+    /// See `IdentityListView.groupedSections` -- same bug, same fix. A saved
+    /// post-quantum recipient was invisible here too.
     private var groupedSections: [(title: String, items: [StoredRecipient])] {
         let groups = Dictionary(grouping: vault.recipients, by: { $0.type })
-        let order: [(StoredRecipientType, String)] = [
-            (.x25519,    "age X25519"),
-            (.sshEd25519, "SSH Ed25519"),
-            (.sshRSA,    "SSH RSA")
-        ]
-        return order.compactMap { (type, title) in
+        return StoredRecipientType.allCases.compactMap { type in
             guard let items = groups[type], !items.isEmpty else { return nil }
-            return (title, items.sorted { $0.createdAt < $1.createdAt })
+            return (type.sectionTitle, items.sorted { $0.createdAt < $1.createdAt })
         }
     }
 }

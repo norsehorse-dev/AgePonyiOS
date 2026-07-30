@@ -349,10 +349,7 @@ struct AddRecipientView: View {
     }
 
     private func sourceForPaste(_ type: StoredRecipientType) -> StoredRecipientSource {
-        switch type {
-        case .x25519, .postQuantum: return .pasteAge
-        case .sshEd25519, .sshRSA:  return .pasteSSH
-        }
+        type.pastedSource
     }
 
     private func typeLabel(_ t: StoredRecipientType) -> String {
