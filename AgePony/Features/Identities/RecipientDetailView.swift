@@ -139,20 +139,7 @@ struct RecipientDetailView: View {
     /// stable for any view bound to the recipient by id.
     private func renameRecipient(to newName: String) {
         guard let existing = recipient else { return }
-        // Build a copy with the new name but the same id / createdAt /
-        // everything else. Then replace.
-        let renamed = StoredRecipient(
-            id: existing.id,
-            name: newName,
-            type: existing.type,
-            publicKeyMaterial: existing.publicKeyMaterial,
-            sshComment: existing.sshComment,
-            source: existing.source,
-            sourceMetadata: existing.sourceMetadata,
-            createdAt: existing.createdAt
-        )
-        try? vault.deleteRecipient(id: existing.id)
-        _ = try? vault.addRecipient(renamed)
+        try? vault.renameRecipient(id: existing.id, to: newName)
     }
 
     private func typeLabel(_ t: StoredRecipientType) -> String {

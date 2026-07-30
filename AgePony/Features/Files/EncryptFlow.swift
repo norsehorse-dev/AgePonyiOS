@@ -98,7 +98,8 @@ struct EncryptFlow: View {
                         onConfirm: { recipients, passphrase in
                             self.recipients = recipients
                             self.passphrase = passphrase
-                        }
+                        },
+                        onSaveRecipient: { try vault.addRecipient($0) }
                     )
                 }
             }

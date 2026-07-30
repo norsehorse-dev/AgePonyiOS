@@ -196,6 +196,16 @@ public final class Vault {
         return recipient
     }
 
+    /// Rename in place, matching renameIdentity and renameSigner.
+    ///
+    /// The alternative -- delete then re-add -- has a window where the vault
+    /// holds neither copy, and reorders the list on success.
+    public func renameRecipient(id: UUID, to newName: String) throws {
+        guard let idx = recipients.firstIndex(where: { $0.id == id }) else { return }
+        recipients[idx].name = newName
+        try persist()
+    }
+
     public func deleteRecipient(id: UUID) throws {
         recipients.removeAll { $0.id == id }
         try persist()

@@ -32,11 +32,15 @@ struct RecipientPickerView: View {
     /// Called when the user confirms. Returns a fully-hydrated recipient
     /// list, PLUS an optional passphrase if the user picked scrypt mode.
     let onConfirm: (_ recipients: [any AgeRecipient], _ passphrase: String?) -> Void
+    /// Persist a pasted key as a named recipient. Nil disables saving, leaving
+    /// the paste field one-time only.
+    let onSaveRecipient: ((StoredRecipient) throws -> Void)?
 
     @State private var selectedIdentityIDs: Set<UUID>
     @State private var selectedRecipientIDs: Set<UUID> = []
     @State private var adHocRecipients: [AdHocRecipient] = []
     @State private var pasteText: String = ""
+    @State private var pasteName: String = ""
     @State private var pasteError: String?
 
     @State private var useScrypt: Bool = false
@@ -49,12 +53,14 @@ struct RecipientPickerView: View {
         identities: [StoredIdentity],
         savedRecipients: [StoredRecipient],
         initiallySelectedIdentityIDs: Set<UUID>,
-        onConfirm: @escaping (_ recipients: [any AgeRecipient], _ passphrase: String?) -> Void
+        onConfirm: @escaping (_ recipients: [any AgeRecipient], _ passphrase: String?) -> Void,
+        onSaveRecipient: ((StoredRecipient) throws -> Void)? = nil
     ) {
         self.identities = identities
         self.savedRecipients = savedRecipients
         self.initiallySelectedIdentityIDs = initiallySelectedIdentityIDs
         self.onConfirm = onConfirm
+        self.onSaveRecipient = onSaveRecipient
         _selectedIdentityIDs = State(initialValue: initiallySelectedIdentityIDs)
     }
 
@@ -62,6 +68,9 @@ struct RecipientPickerView: View {
         let id: UUID = UUID()
         let displayLabel: String
         let recipient: any AgeRecipient
+        /// Set when this key was also saved to the vault, so the row can say so
+        /// instead of claiming it is one-time.
+        var savedName: String?
     }
 
     var body: some View {
@@ -145,9 +154,10 @@ struct RecipientPickerView: View {
                             .font(AgePonyTypography.footnote)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Text("ad-hoc, not saved")
+                        Text(ad.savedName.map { "saved as \"\($0)\"" } ?? "this file only, not saved")
                             .font(AgePonyTypography.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ad.savedName == nil
+                                             ? Color.secondary : AgePonyColors.tealCore)
                     }
                     Spacer()
                     Button(role: .destructive) {
@@ -171,18 +181,37 @@ struct RecipientPickerView: View {
                     .foregroundStyle(AgePonyColors.destructive)
             }
 
+            if onSaveRecipient != nil {
+                TextField("Name (to save it for reuse)", text: $pasteName)
+                    .font(AgePonyTypography.footnote)
+                    .textInputAutocapitalization(.words)
+            }
+
             Button {
-                addAdHoc()
+                addPasted(save: false)
             } label: {
-                Label("Add ad-hoc recipient", systemImage: "plus.circle")
+                Label("Use for this file only", systemImage: "plus.circle")
                     .font(AgePonyTypography.footnote)
             }
             .foregroundStyle(AgePonyColors.tealCore)
-            .disabled(pasteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(pasteIsEmpty)
+
+            if onSaveRecipient != nil {
+                Button {
+                    addPasted(save: true)
+                } label: {
+                    Label("Save as recipient and use", systemImage: "square.and.arrow.down")
+                        .font(AgePonyTypography.footnote)
+                }
+                .foregroundStyle(AgePonyColors.tealCore)
+                .disabled(pasteIsEmpty)
+            }
         } header: {
-            Text("One-time recipient")
+            Text("Paste a recipient")
         } footer: {
-            Text("Recipients added here apply only to this file. To reuse them, save in the Recipients tab.")
+            Text(onSaveRecipient == nil
+                 ? "Recipients added here apply only to this file. To reuse them, save in the Recipients tab."
+                 : "Use it once, or give it a name and keep it. Saved recipients appear in the Recipients tab. Without a name, a saved key is filed under the key's own label.")
         }
     }
 
@@ -282,41 +311,50 @@ struct RecipientPickerView: View {
 
     // MARK: - Actions
 
-    private func addAdHoc() {
+    private var pasteIsEmpty: Bool {
+        pasteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Parse the pasted key once and either keep it for this file or also save
+    /// it. Both outcomes go through RecipientImportService, the same parser the
+    /// Recipients tab uses, so a key saved here is indistinguishable from one
+    /// added there.
+    private func addPasted(save: Bool) {
         let raw = pasteText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
         pasteError = nil
         do {
-            let parsed = try parseAdHoc(raw)
-            adHocRecipients.append(parsed)
+            let candidate = try RecipientImportService.parsePastedText(raw)
+            let typed = pasteName.trimmingCharacters(in: .whitespaces)
+            let name = typed.isEmpty ? candidate.defaultName : typed
+
+            let stored = StoredRecipient(
+                name: name,
+                type: candidate.type,
+                publicKeyMaterial: candidate.publicKeyMaterial,
+                sshComment: candidate.sshComment,
+                source: candidate.type == .x25519 ? .pasteAge : .pasteSSH,
+                sourceMetadata: nil
+            )
+            let recipient = try stored.toAgeRecipient()
+
+            if save {
+                guard let onSaveRecipient else { return }
+                try onSaveRecipient(stored)
+            }
+
+            adHocRecipients.append(AdHocRecipient(
+                displayLabel: save ? name : shorten(raw),
+                recipient: recipient,
+                savedName: save ? name : nil
+            ))
             pasteText = ""
+            pasteName = ""
         } catch {
             pasteError = readable(error)
         }
     }
 
-    private func parseAdHoc(_ raw: String) throws -> AdHocRecipient {
-        if raw.hasPrefix("age1") {
-            let recipient = try X25519Recipient(ageRecipient: raw)
-            return AdHocRecipient(
-                displayLabel: shorten(raw),
-                recipient: recipient
-            )
-        }
-        let recipients = SSHKeySource.parse(text: raw)
-        guard let first = recipients.first else {
-            throw AdHocParseError.unrecognized
-        }
-        let label: String
-        if raw.hasPrefix("ssh-ed25519") {
-            label = "SSH Ed25519 (ad-hoc)"
-        } else if raw.hasPrefix("ssh-rsa") {
-            label = "SSH RSA (ad-hoc)"
-        } else {
-            label = "SSH key (ad-hoc)"
-        }
-        return AdHocRecipient(displayLabel: label, recipient: first)
-    }
 
     private enum AdHocParseError: Error {
         case unrecognized

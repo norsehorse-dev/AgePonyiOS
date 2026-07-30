@@ -62,7 +62,8 @@ struct TextEncryptView: View {
                         self.recipients = recipients
                         self.passphrase = passphrase
                         self.resultArmored = nil
-                    }
+                    },
+                    onSaveRecipient: { try vault.addRecipient($0) }
                 )
             }
         }
