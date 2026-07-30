@@ -147,6 +147,7 @@ struct RecipientDetailView: View {
         case .x25519:    return "age X25519"
         case .sshEd25519: return "SSH Ed25519"
         case .sshRSA:    return "SSH RSA"
+        case .postQuantum: return "Post-quantum hybrid"
         }
     }
 

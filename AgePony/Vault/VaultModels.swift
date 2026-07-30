@@ -23,6 +23,9 @@ public enum StoredIdentityType: String, Codable, Hashable {
     case secureEnclaveP256
     case skEd25519
     case skEcdsaP256
+    /// MLKEM768-X25519 hybrid. Private material is the 32-byte seed; the
+    /// public half is derived from it deterministically.
+    case postQuantum
 }
 
 public struct StoredIdentity: Codable, Identifiable, Hashable {
@@ -87,6 +90,8 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
                 throw VaultModelError.malformedPrivateMaterial(type)
             }
             return try SSHRSAIdentity(openSSHPrivateKey: pem)
+        case .postQuantum:
+            return try HybridIdentity(seed: privateKeyMaterial)
         case .secureEnclaveP256:
             // Signing-only. Secure Enclave P-256 keys have no age stanza, so
             // they cannot decrypt. Decrypt paths use `try?` and skip these.
@@ -115,6 +120,8 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
             let b64 = publicKeyMaterial.base64EncodedString()
             let line = "ssh-rsa \(b64)" + (sshComment.map { " \($0)" } ?? "")
             return try SSHRSARecipient(sshPublicKeyLine: line)
+        case .postQuantum:
+            return try HybridRecipient(publicKey: publicKeyMaterial)
         case .secureEnclaveP256:
             // Signing-only — not usable as an age recipient.
             throw VaultModelError.signingOnlyIdentity(type)
@@ -129,6 +136,8 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
     public var canSign: Bool {
         switch type {
         case .x25519:                 return false
+        // ML-KEM is a key encapsulation mechanism, not a signature scheme.
+        case .postQuantum:            return false
         case .sshEd25519, .sshRSA:    return true
         case .secureEnclaveP256:      return true
         case .skEd25519, .skEcdsaP256: return true
@@ -141,6 +150,7 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
     public var canBeRecipient: Bool {
         switch type {
         case .x25519, .sshEd25519, .sshRSA: return true
+        case .postQuantum:                  return true
         case .secureEnclaveP256:            return false
         case .skEd25519, .skEcdsaP256:      return false
         }
@@ -170,6 +180,8 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
         case .sshRSA:
             let b64 = publicKeyMaterial.base64EncodedString()
             return "ssh-rsa \(b64)" + (sshComment.map { " \($0)" } ?? "")
+        case .postQuantum:
+            return Bech32.encodePostQuantumRecipient(Array(publicKeyMaterial))
         case .secureEnclaveP256:
             let b64 = publicKeyMaterial.base64EncodedString()
             return "ecdsa-sha2-nistp256 \(b64)" + (sshComment.map { " \($0)" } ?? "")
@@ -208,6 +220,11 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
             return "(could not serialize ed25519 private key)"
         case .sshRSA:
             return String(data: privateKeyMaterial, encoding: .utf8) ?? "(non-UTF8 PEM)"
+        case .postQuantum:
+            if let id = try? HybridIdentity(seed: privateKeyMaterial) {
+                return id.ageIdentityString
+            }
+            return "(invalid post-quantum identity)"
         case .secureEnclaveP256:
             return "(Secure Enclave — the private key is generated in hardware and never leaves this device)"
         case .skEd25519, .skEcdsaP256:
@@ -250,6 +267,8 @@ public enum StoredRecipientType: String, Codable, Hashable {
     case x25519
     case sshEd25519
     case sshRSA
+    /// MLKEM768-X25519 hybrid, an `age1pq1…` recipient.
+    case postQuantum
 }
 
 public enum StoredRecipientSource: String, Codable, Hashable {

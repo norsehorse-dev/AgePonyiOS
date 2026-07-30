@@ -31,6 +31,8 @@ public extension StoredRecipient {
             let b64 = publicKeyMaterial.base64EncodedString()
             let line = "ssh-rsa \(b64)" + (sshComment.map { " \($0)" } ?? "")
             return try SSHRSARecipient(sshPublicKeyLine: line)
+        case .postQuantum:
+            return try HybridRecipient(publicKey: publicKeyMaterial)
         }
     }
 
@@ -50,6 +52,8 @@ public extension StoredRecipient {
         case .sshRSA:
             let b64 = publicKeyMaterial.base64EncodedString()
             return "ssh-rsa \(b64)" + (sshComment.map { " \($0)" } ?? "")
+        case .postQuantum:
+            return Bech32.encodePostQuantumRecipient(Array(publicKeyMaterial))
         }
     }
 

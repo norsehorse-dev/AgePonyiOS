@@ -312,7 +312,9 @@ public enum AgeFileInspector {
                 var b64 = first4.base64EncodedString()
                 while b64.hasSuffix("=") { b64.removeLast() }
                 map[b64] = identity.name
-            case .x25519, .secureEnclaveP256, .skEd25519, .skEcdsaP256:
+            // No SSH tag: like X25519, the post-quantum stanza is anonymous,
+            // so a file cannot advertise that it is addressed to you.
+            case .x25519, .postQuantum, .secureEnclaveP256, .skEd25519, .skEcdsaP256:
                 continue
             }
         }

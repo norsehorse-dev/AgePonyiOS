@@ -170,6 +170,7 @@ struct IdentityDetailView: View {
         case .secureEnclaveP256: return "Secure Enclave (P-256)"
         case .skEd25519: return "Security Key (Ed25519)"
         case .skEcdsaP256: return "Security Key (P-256)"
+        case .postQuantum: return "Post-quantum hybrid"
         }
     }
 }

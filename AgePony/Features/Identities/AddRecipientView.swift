@@ -350,8 +350,8 @@ struct AddRecipientView: View {
 
     private func sourceForPaste(_ type: StoredRecipientType) -> StoredRecipientSource {
         switch type {
-        case .x25519:    return .pasteAge
-        case .sshEd25519, .sshRSA: return .pasteSSH
+        case .x25519, .postQuantum: return .pasteAge
+        case .sshEd25519, .sshRSA:  return .pasteSSH
         }
     }
 
@@ -360,6 +360,7 @@ struct AddRecipientView: View {
         case .x25519:    return "age X25519"
         case .sshEd25519: return "SSH Ed25519"
         case .sshRSA:    return "SSH RSA"
+        case .postQuantum: return "Post-quantum hybrid"
         }
     }
 

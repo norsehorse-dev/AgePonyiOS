@@ -108,6 +108,7 @@ private struct RecipientRow: View {
         case .x25519:    return "person.crop.circle.fill"
         case .sshEd25519: return "person.crop.circle.badge.checkmark"
         case .sshRSA:    return "person.crop.circle.badge.checkmark"
+        case .postQuantum: return "atom"
         }
     }
 

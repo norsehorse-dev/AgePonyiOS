@@ -48,6 +48,19 @@ public enum RecipientImportService {
         let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { throw RecipientImportError.unrecognizedFormat }
 
+        // age1pq1... — checked before the plain age1 branch, since "age1pq1"
+        // also starts with "age1" and would otherwise be parsed as X25519 and
+        // rejected for being the wrong length.
+        if trimmed.hasPrefix("age1pq1") {
+            let recipient = try HybridRecipient(ageRecipient: trimmed)
+            return RecipientImportCandidate(
+                type: .postQuantum,
+                publicKeyMaterial: recipient.publicKey,
+                sshComment: nil,
+                defaultName: shortenedAgeName(trimmed)
+            )
+        }
+
         // age1...
         if trimmed.hasPrefix("age1") {
             let recipient = try X25519Recipient(ageRecipient: trimmed)

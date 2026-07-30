@@ -89,7 +89,8 @@ public enum FileSigner {
             // Security keys sign over NFC, which is async. Callers must route
             // these through signWithSecurityKey(...) instead.
             throw FileSignerError.requiresSecurityKey
-        case .x25519:
+        case .x25519, .postQuantum:
+            // Both are encryption-only. ML-KEM is a KEM, not a signature scheme.
             throw FileSignerError.identityCannotSign
         }
 

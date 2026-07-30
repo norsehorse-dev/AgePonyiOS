@@ -174,7 +174,7 @@ public enum FileVerifier {
         switch identity.type {
         case .sshEd25519, .sshRSA, .secureEnclaveP256, .skEd25519, .skEcdsaP256:
             return identity.publicKeyMaterial == wire
-        case .x25519:
+        case .x25519, .postQuantum:
             return false
         }
     }
@@ -182,7 +182,7 @@ public enum FileVerifier {
     private static func keyMatches(_ recipient: StoredRecipient, _ wire: Data) -> Bool {
         switch recipient.type {
         case .sshEd25519, .sshRSA: return recipient.publicKeyMaterial == wire
-        case .x25519:              return false
+        case .x25519, .postQuantum: return false
         }
     }
 

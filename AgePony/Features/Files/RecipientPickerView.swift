@@ -393,6 +393,7 @@ struct RecipientPickerView: View {
         case .secureEnclaveP256: return "Secure Enclave (P-256)"
         case .skEd25519: return "Security Key (Ed25519)"
         case .skEcdsaP256: return "Security Key (P-256)"
+        case .postQuantum: return "Post-quantum hybrid"
         }
     }
 
@@ -401,6 +402,7 @@ struct RecipientPickerView: View {
         case .x25519:    return "age X25519"
         case .sshEd25519: return "SSH Ed25519"
         case .sshRSA:    return "SSH RSA"
+        case .postQuantum: return "Post-quantum hybrid"
         }
     }
 

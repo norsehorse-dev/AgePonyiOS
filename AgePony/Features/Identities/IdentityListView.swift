@@ -134,6 +134,7 @@ private struct IdentityRow: View {
         case .sshRSA:    return "lock.shield"
         case .secureEnclaveP256: return "cpu"
         case .skEd25519, .skEcdsaP256: return "key.radiowaves.forward"
+        case .postQuantum: return "atom"
         }
     }
 
