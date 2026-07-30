@@ -106,6 +106,9 @@ private struct IdentityRow: View {
                 HStack(spacing: 6) {
                     Text(identity.name)
                         .font(AgePonyTypography.bodyEmph)
+                    if identity.type == .postQuantum {
+                        PostQuantumBadge(compact: true)
+                    }
                     if isActive {
                         Text("ACTIVE")
                             .font(.system(size: 9, weight: .semibold, design: .default))

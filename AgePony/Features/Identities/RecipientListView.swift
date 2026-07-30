@@ -84,6 +84,9 @@ private struct RecipientRow: View {
                 Text(recipient.name)
                     .font(AgePonyTypography.bodyEmph)
                 HStack(spacing: 6) {
+                    if recipient.type == .postQuantum {
+                        PostQuantumBadge(compact: true)
+                    }
                     Text(sourceLabel)
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(AgePonyColors.tealCore)

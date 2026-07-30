@@ -33,6 +33,7 @@ struct GenerateIdentityView: View {
     /// Which kind of identity is being generated.
     enum KeyKind: String, CaseIterable, Identifiable {
         case ageX25519
+        case postQuantum
         case sshEd25519
         case secureEnclaveP256
         case securityKey
@@ -40,6 +41,7 @@ struct GenerateIdentityView: View {
         var label: String {
             switch self {
             case .ageX25519:         return "age key"
+            case .postQuantum:       return "Post-quantum"
             case .sshEd25519:        return "SSH key"
             case .secureEnclaveP256: return "Enclave"
             case .securityKey:       return "Security Key"
@@ -56,6 +58,10 @@ struct GenerateIdentityView: View {
 
     // X25519 (original path).
     @State private var identity: X25519Identity = X25519Identity.generate()
+
+    // MLKEM768-X25519 hybrid. The 32-byte seed is the whole key: both halves
+    // derive from it, so it is also the whole backup.
+    @State private var pqIdentity: HybridIdentity? = nil
 
     // SSH Ed25519 (new in 2.0).
     @State private var sshSeed: Data = Data()
@@ -173,6 +179,8 @@ struct GenerateIdentityView: View {
         switch keyKind {
         case .ageX25519:
             return "Encryption only. The simplest age identity."
+        case .postQuantum:
+            return "Encryption only, and safe against a future quantum computer. Files stay secret even if X25519 is broken later. Readable by the age CLI 1.3 and newer. A post-quantum recipient can't be combined with a classical one on the same file, since the weaker of the two would set the bar."
         case .sshEd25519:
             return "Encryption and signing. Use it as an age recipient and to sign files. Exportable as an OpenSSH key."
         case .secureEnclaveP256:
@@ -185,6 +193,7 @@ struct GenerateIdentityView: View {
     private var publicLabel: String {
         switch keyKind {
         case .ageX25519:  return "Public string (age recipient)"
+        case .postQuantum: return "Public string (post-quantum recipient)"
         case .sshEd25519: return "Public key (SSH ed25519)"
         case .secureEnclaveP256: return "Public key (Secure Enclave P-256)"
         case .securityKey:       return "Public key (security key)"
@@ -195,6 +204,9 @@ struct GenerateIdentityView: View {
         switch keyKind {
         case .ageX25519:
             return identity.ageRecipient
+        case .postQuantum:
+            guard let pqIdentity else { return "(generating post-quantum key…)" }
+            return (try? pqIdentity.recipient().ageRecipient) ?? "(invalid post-quantum key)"
         case .sshEd25519:
             return OpenSSHEd25519Export.publicKeyLine(publicKey: sshPub, comment: "agepony")
         case .secureEnclaveP256:
@@ -209,6 +221,8 @@ struct GenerateIdentityView: View {
         switch keyKind {
         case .ageX25519:
             return "Safe to share. Anyone with this string can encrypt files to you."
+        case .postQuantum:
+            return "Safe to share, and long — about 1,950 characters, because it carries an ML-KEM key alongside an X25519 one."
         case .sshEd25519:
             return "Safe to share. Others can encrypt to you with it, and verify files you sign."
         case .secureEnclaveP256:
@@ -224,6 +238,8 @@ struct GenerateIdentityView: View {
         switch keyKind {
         case .ageX25519:
             identity = X25519Identity.generate()
+        case .postQuantum:
+            pqIdentity = try? HybridIdentity.generate()
         case .sshEd25519:
             generateSSH()
         case .secureEnclaveP256:
@@ -270,6 +286,20 @@ struct GenerateIdentityView: View {
                     type: .x25519,
                     publicKeyMaterial: identity.publicKey,
                     privateKeyMaterial: identity.privateKey,
+                    sshComment: nil
+                )
+            case .postQuantum:
+                if pqIdentity == nil { pqIdentity = try? HybridIdentity.generate() }
+                guard let pq = pqIdentity else {
+                    saveError = "Couldn't generate a post-quantum key. Try Regenerate."
+                    saving = false
+                    return
+                }
+                stored = StoredIdentity(
+                    name: trimmed,
+                    type: .postQuantum,
+                    publicKeyMaterial: pq.publicKey,
+                    privateKeyMaterial: pq.seed,
                     sshComment: nil
                 )
             case .sshEd25519:
