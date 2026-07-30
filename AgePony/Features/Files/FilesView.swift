@@ -23,6 +23,7 @@ struct FilesView: View {
     @State private var showSign: Bool = false
     @State private var showVerify: Bool = false
     @State private var showInspect: Bool = false
+    @State private var showMigrate: Bool = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -77,6 +78,13 @@ struct FilesView: View {
                     Label("Inspect a file", systemImage: "doc.text.magnifyingglass")
                 }
                 .buttonStyle(.agePonySecondary)
+
+                Button {
+                    showMigrate = true
+                } label: {
+                    Label("Re-encrypt a file", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.agePonySecondary)
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 32)
@@ -106,6 +114,11 @@ struct FilesView: View {
         .sheet(isPresented: $showInspect) {
             NavigationStack {
                 InspectFlow(vault: vault)
+            }
+        }
+        .sheet(isPresented: $showMigrate) {
+            NavigationStack {
+                MigrateFlow(vault: vault)
             }
         }
         .onChange(of: pendingExternalDecryptURL) { _, newValue in
