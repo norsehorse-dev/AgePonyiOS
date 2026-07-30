@@ -1,0 +1,24 @@
+AgePony 3.1.0 brings post-quantum encryption, and makes file size stop mattering.
+
+Post-quantum
+- Quantum-safe hybrid keys (ML-KEM-768 + X25519) that resist future quantum computers, interoperable with the age CLI 1.3 and newer.
+- Clear quantum-safe badges so you always know your protection.
+- New re-encrypt tool: move files you already hold onto a quantum-safe key. Your original is left untouched.
+
+Any size
+- Encrypt and decrypt files of any size. Nothing is held in memory, so a 1 GB file works like a small one.
+- Signing and verifying stream too, so a large file no longer has to fit in memory to be signed.
+- The scrypt work factor is adjustable now, for devices with less memory to spare.
+
+Signing
+- Encrypt and sign a file in one step. The signature now travels sealed inside the encrypted file, so one file goes out instead of two and the ciphertext no longer reveals who signed it.
+- Signatures are checked as a file decrypts, and the signer is shown.
+- Files signed with AgePony 2.0, as a .age alongside a .age.sig, still verify.
+
+Also
+- Encrypting several files now asks: one archive, or one encrypted file each.
+- Inspect any age file to see what it is encrypted to, without decrypting it.
+- Rename saved recipients, and save a pasted key with a name.
+- Returns to the tab you left on re-lock.
+
+Everything still runs on your device. No tracking, no ads.
