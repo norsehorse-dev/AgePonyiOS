@@ -123,13 +123,25 @@ public enum SSHSig {
 
     /// Build the exact bytes a signature is computed over.
     public static func signedData(message: Data, namespace: String, hash: SSHSigHash) -> Data {
+        signedData(messageHash: hash.digest(message), namespace: namespace, hash: hash)
+    }
+
+    /// Build the signed blob from a digest that has already been computed.
+    ///
+    /// SSHSIG only ever covers the hash, so a message that was too large to
+    /// hold -- or that has already streamed past, as the payload of a signed
+    /// bundle does -- can still be signed and verified from its digest alone.
+    ///
+    /// `messageHash` must be the output of `hash.digest(_:)` or its streaming
+    /// equivalent over the same bytes.
+    public static func signedData(messageHash: Data, namespace: String, hash: SSHSigHash) -> Data {
         var out = Data()
         out.append(magic)                       // raw 6 bytes
         var w = SSHWireWriter()
         w.writeString(namespace)
         w.writeString(Data())                   // reserved, empty
         w.writeString(hash.rawValue)
-        w.writeString(hash.digest(message))     // H(message)
+        w.writeString(messageHash)              // H(message)
         out.append(w.data)
         return out
     }

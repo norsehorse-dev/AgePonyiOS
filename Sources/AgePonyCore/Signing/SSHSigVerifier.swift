@@ -55,6 +55,29 @@ public enum SSHSigVerifier {
         armoredSignature: String,
         expectedNamespace: String? = SSHSig.defaultNamespace
     ) throws -> SSHSigVerification {
+        try verify(
+            armoredSignature: armoredSignature,
+            expectedNamespace: expectedNamespace,
+            messageHash: { $0.digest(message) }
+        )
+    }
+
+    /// Verify against a digest supplied on demand, rather than the message.
+    ///
+    /// SSHSIG covers only the hash, so a message that cannot be held -- or that
+    /// has already streamed past, as a signed bundle's payload has by the time
+    /// its signature entry is read -- can still be verified.
+    ///
+    /// `messageHash` is asked for the algorithm named in the signature, which
+    /// is not known until the signature has been parsed. Callers that computed
+    /// digests ahead of time should have computed every algorithm they might be
+    /// asked for; `SignedBundle.StreamParsed` does exactly that.
+    @discardableResult
+    public static func verify(
+        armoredSignature: String,
+        expectedNamespace: String? = SSHSig.defaultNamespace,
+        messageHash: (SSHSigHash) throws -> Data
+    ) throws -> SSHSigVerification {
         let blob = try SSHSig.parseArmored(armoredSignature)
 
         if let expected = expectedNamespace, expected != blob.namespace {
@@ -65,7 +88,7 @@ public enum SSHSigVerifier {
         let (innerType, rawSig) = try SSHSig.parseInnerSignature(blob.signature)
 
         let signed = SSHSig.signedData(
-            message: message,
+            messageHash: try messageHash(blob.hash),
             namespace: blob.namespace,
             hash: blob.hash
         )
