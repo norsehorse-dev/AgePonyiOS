@@ -14,17 +14,20 @@
 //
 //    agepony://share?…   — payloads handed off by the share extension
 //                          (1g). The extension wrote the actual bytes to
-//                          the App Group container and is asking us to
-//                          process them with full vault access. Reads the
-//                          payload via SharedContainer.readPayload(token:)
-//                          and posts .agePonyShareIncoming with the
-//                          payload as userInfo for HomeView to consume.
+//                          the App Group container. Posts the token (a UUID,
+//                          checked here) as .agePonyShareIncoming; RootView
+//                          claims the payload at once (5.0.1, M-7) and holds
+//                          it until the vault is unlocked, or offers it to
+//                          passphrase mode.
 //
 
 import SwiftUI
+import UIKit
 
 @main
 struct AgePonyApp: App {
+    @UIApplicationDelegateAdaptor(AgePonyAppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -51,21 +54,26 @@ struct AgePonyApp: App {
         guard url.host == "share" else { return }
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         guard let token = components?.queryItems?.first(where: { $0.name == "token" })?.value,
-              !token.isEmpty else {
+              UUID(uuidString: token) != nil else {
             return
         }
-        do {
-            let payload = try SharedContainer.readPayload(token: token)
-            NotificationCenter.default.post(
-                name: .agePonyShareIncoming,
-                object: nil,
-                userInfo: ["payload": payload]
-            )
-        } catch {
-            // Couldn't load the payload — likely an abandoned token or a
-            // malformed manifest. Silently drop; the user will notice the
-            // share didn't show up and retry.
-        }
+        NotificationCenter.default.post(
+            name: .agePonyShareIncoming,
+            object: nil,
+            userInfo: ["token": token]
+        )
+    }
+}
+
+// MARK: - App delegate
+
+/// Only the system keyboard inside AgePony (5.0.1, L-23): a third-party
+/// keyboard sees every key typed, passwords and note text included, and some
+/// send it off the device.
+final class AgePonyAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     shouldAllowExtensionPointIdentifier extensionPointIdentifier: UIApplication.ExtensionPointIdentifier) -> Bool {
+        extensionPointIdentifier != .keyboard
     }
 }
 
@@ -78,8 +86,7 @@ extension Notification.Name {
     static let agePonyOpenAgeFile = Notification.Name("com.agepony.app.openAgeFile")
 
     /// Posted when the share extension hands us a payload via the
-    /// `agepony://share?token=<uuid>` URL scheme. HomeView listens for
-    /// this and presents the appropriate flow (encrypt or decrypt, file
-    /// or text) with the input preloaded.
+    /// `agepony://share?token=<uuid>` URL scheme. RootView claims it and
+    /// HomeView presents the matching flow once the vault is open.
     static let agePonyShareIncoming = Notification.Name("com.agepony.app.shareIncoming")
 }

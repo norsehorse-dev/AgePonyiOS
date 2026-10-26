@@ -60,7 +60,12 @@ final class ArmorTests: XCTestCase {
         let bytes = Data("hello".utf8)
         let armored = AgeArmor.encode(bytes)
         let polluted = "some junk\n" + armored
+        // Go age's reader (and Android since 5.0.1) stops at the first non-blank line that
+        // isn't BEGIN.
         XCTAssertThrowsError(try AgeArmor.decode(polluted)) { error in
+            XCTAssertEqual(error as? AgeArmorError, .missingBeginMarker)
+        }
+        XCTAssertThrowsError(try AgeArmor.decode(armored + "junk\n")) { error in
             XCTAssertEqual(error as? AgeArmorError, .extraDataOutsideArmor)
         }
     }

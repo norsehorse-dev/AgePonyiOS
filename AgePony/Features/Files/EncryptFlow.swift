@@ -32,7 +32,7 @@ struct EncryptFlow: View {
     @State private var batchResults: [FileEncryptor.BatchResult] = []
     @State private var recipients: [any AgeRecipient] = []
     @State private var passphrase: String?
-    @State private var armor: Bool = true
+    @AppStorage("com.agepony.app.encrypt.armor") private var armor: Bool = true
     @State private var working: Bool = false
     /// Fraction of the input consumed, or nil before the first report.
     @State private var progressFraction: Double?
@@ -97,9 +97,13 @@ struct EncryptFlow: View {
                         identities: vault.identities,
                         savedRecipients: vault.recipients,
                         initiallySelectedIdentityIDs: defaultSelectedIdentityIDs,
+                        initiallySelectedRecipientIDs: vault.backupRecipientSelection,
+                        initialUseScrypt: vault.sessionPassphrase != nil,
+                        initialPassphrase: vault.sessionPassphrase ?? "",
                         onConfirm: { recipients, passphrase in
                             self.recipients = recipients
                             self.passphrase = passphrase
+                            vault.sessionPassphrase = passphrase
                         },
                         onSaveRecipient: { try vault.addRecipient($0) }
                     )
@@ -112,6 +116,17 @@ struct EncryptFlow: View {
                 Button("OK", role: .cancel) { errorMessage = nil }
             } message: {
                 Text(errorMessage ?? "")
+            }
+            .onChange(of: signingAvailable) { _, available in
+                // A signature covers exactly one output. Adding a second file,
+                // or switching a multi-file batch to "encrypt separately", makes
+                // signing impossible, and the Sign toggle is disabled in that
+                // state -- so a value left on from an earlier single-file run
+                // could not be switched back off by hand. That stranded signing
+                // on and dead-ended runEncrypt in the sign path, which has no
+                // single output to sign. Drop it the instant signing stops
+                // being available so the toggle stays truthful and encrypt runs.
+                if !available, signEnabled { signEnabled = false }
             }
             .onChange(of: signEnabled) { _, on in
                 if on, signingIdentityID == nil {
@@ -141,7 +156,7 @@ struct EncryptFlow: View {
             return "Add an SSH identity (Ed25519 or RSA) to sign. A signature proves the encrypted file came from you and wasn't changed in transit."
         }
         if signEnabled {
-            return "Produces a detached .age.sig next to the encrypted file, signing the encrypted bytes. Share both so the recipient can verify."
+            return "The signature is sealed inside the encrypted file: only someone who can decrypt it sees who signed it. It's still a standard age file, and AgePony on iPhone or Android checks the signature when it decrypts."
         }
         return "Optionally attach a signature so the recipient can verify the file came from you."
     }
@@ -573,7 +588,7 @@ struct EncryptFlow: View {
     /// (potentially scrypt-bound) runs on a background queue so the main
     /// thread can keep updating UI during the spinner.
     private func runEncrypt() {
-        if signEnabled {
+        if signEnabled && signingAvailable {
             runSignedEncrypt()
             return
         }

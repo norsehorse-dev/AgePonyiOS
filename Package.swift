@@ -16,7 +16,7 @@ import PackageDescription
 let package = Package(
     name: "AgePonyCore",
     platforms: [
-        .iOS(.v18),
+        .iOS(.v17),
         .macOS(.v14)  // for `swift test` from the terminal during dev
     ],
     products: [

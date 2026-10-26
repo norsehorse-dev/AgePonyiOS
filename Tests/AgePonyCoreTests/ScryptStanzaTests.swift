@@ -60,16 +60,17 @@ final class ScryptStanzaTests: XCTestCase {
         }
     }
 
-    func testRejectsMalformedWorkFactor() {
+    func testRejectsMalformedWorkFactor() throws {
         let identity = ScryptIdentity(passphrase: "p")
-        let stanza = Stanza(
-            type: "scrypt",
-            args: [Stanza.base64NoPad(Data(repeating: 0, count: 16)), "abc"],
-            body: Data(repeating: 0, count: 32)
-        )
-        XCTAssertThrowsError(try identity.unwrap(stanza: stanza)) { error in
-            XCTAssertEqual(error as? ScryptStanzaError, .invalidWorkFactor)
+        let salt = Stanza.base64NoPad(Data(repeating: 0, count: 16))
+        // A malformed work factor is "not for me", as in Go age (audit L-1).
+        for wf in ["abc", "010", "+10", "-10", "1e1", "10 ", "", "0", "99999999999"] {
+            let stanza = Stanza(type: "scrypt", args: [salt, wf], body: Data(repeating: 0, count: 32))
+            XCTAssertNil(try identity.unwrap(stanza: stanza), "work factor '\(wf)'")
         }
+        // Wrong body length is refused before any KDF work (audit L-5).
+        let shortBody = Stanza(type: "scrypt", args: [salt, "10"], body: Data(repeating: 0, count: 31))
+        XCTAssertNil(try identity.unwrap(stanza: shortBody))
     }
 
     func testSaltIsRandom() throws {

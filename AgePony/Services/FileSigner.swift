@@ -128,8 +128,9 @@ public enum FileSigner {
             // these through the security-key entry points instead.
             throw FileSignerError.requiresSecurityKey
 
-        case .x25519, .postQuantum:
-            // Both are encryption-only. ML-KEM is a KEM, not a signature scheme.
+        case .x25519, .postQuantum, .secureEnclaveTag, .secureEnclaveTagPQ, .yubikey:
+            // Encryption-only. ML-KEM is a KEM, not a signature scheme, and the
+            // hardware decryption keys only do key agreement.
             throw FileSignerError.identityCannotSign
         }
     }

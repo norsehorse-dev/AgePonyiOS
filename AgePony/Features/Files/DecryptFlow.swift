@@ -39,6 +39,10 @@ struct DecryptFlow: View {
     /// Fraction of the input consumed, or nil before the first report.
     @State private var progressFraction: Double?
     @State private var errorMessage: String?
+    /// YubiKey PIV PIN for this decrypt only, after the key asked for it.
+    @State private var yubiKeyPIN: String?
+    @State private var showYubiKeyPIN = false
+    @State private var yubiKeyPINNote: String?
     @State private var resultURL: URL?
     /// The verdict on a signed bundle's signature, when the file carried one.
     @State private var signature: FileVerificationResult?
@@ -80,6 +84,15 @@ struct DecryptFlow: View {
                 allowsMultipleSelection: false
             ) { result in
                 handleFilePick(result)
+            }
+            .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote) { pin in
+                yubiKeyPIN = pin
+                Task { await runDecrypt(afterPIN: true) }
+            }
+            .onDisappear {
+                // However the flow goes away (swipe, lock, a new share), the
+                // plaintext it wrote goes with it (M-7).
+                if let url = resultURL { FileEncryptor.cleanupTempFile(at: url) }
             }
             .alert(
                 "Decrypt failed",
@@ -236,11 +249,7 @@ struct DecryptFlow: View {
             Spacer()
             VStack(spacing: 12) {
                 if let url = resultURL {
-                    ShareLink(item: url) {
-                        Text("Share decrypted file")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.agePonyPrimary)
+                    PlaintextShareButton(url: url)
                 }
                 Button("Done") {
                     cleanupAndDismiss()
@@ -311,7 +320,7 @@ struct DecryptFlow: View {
         }
     }
 
-    private func runDecrypt() async {
+    private func runDecrypt(afterPIN: Bool = false) async {
         guard let summary, let url = sourceURL else { return }
 
         // Authenticate first, on the main actor, before any heavy work begins.
@@ -319,7 +328,7 @@ struct DecryptFlow: View {
         // authentication. The identity path prompts before private material is
         // used, even though the master key is already in memory — defence in
         // depth, and a signal to the user that something is being unlocked.
-        if !summary.onlyScrypt {
+        if !summary.onlyScrypt && !afterPIN {
             do {
                 try await BiometricGate.authenticate(reason: "Decrypt \"\(sourceName)\"")
             } catch BiometricGateError.userCancelled {
@@ -330,15 +339,30 @@ struct DecryptFlow: View {
             }
         }
 
+        var identitiesSnapshot: [any AgeIdentity] = []
+        if !summary.onlyScrypt {
+            switch await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: yubiKeyPIN) {
+            case .ready(let ids):
+                identitiesSnapshot = ids
+            case .needsPIN(let note):
+                yubiKeyPINNote = note
+                showYubiKeyPIN = true
+                return
+            case .cancelled:
+                return
+            case .failed(let message):
+                errorMessage = message
+                return
+            }
+        }
+        yubiKeyPIN = nil
+
         stage = .decrypting
         working = true
         progressFraction = nil
 
         let usingPassphrase = summary.onlyScrypt
         let passphraseSnapshot = passphrase
-        let identitiesSnapshot: [any AgeIdentity] = usingPassphrase
-            ? []
-            : vault.identities.compactMap { try? $0.toAgeIdentity() }
 
         // Snapshot the vault for signer attribution too: if the plaintext turns
         // out to be a signed bundle, the verdict is worked out on the background
@@ -363,6 +387,9 @@ struct DecryptFlow: View {
                     }
                 )
 
+                // A signed bundle (passphrase files, and every iOS file before
+                // 5.0.1), or a signature stanza in the header (key files from
+                // 5.0.1 on, both platforms).
                 let verdict = outcome.signedBundle.map {
                     FileVerifier.verify(
                         bundle: $0,
@@ -370,7 +397,13 @@ struct DecryptFlow: View {
                         recipients: storedRecipients,
                         signers: storedSigners
                     )
-                }
+                } ?? FileVerifier.verify(
+                    stanza: outcome.signatureStanza,
+                    plaintextURL: outcome.url,
+                    identities: storedIdentities,
+                    recipients: storedRecipients,
+                    signers: storedSigners
+                )
 
                 DispatchQueue.main.async {
                     resultURL = outcome.url

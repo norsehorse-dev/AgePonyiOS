@@ -31,6 +31,8 @@ struct CreateNoteView: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    private var wordlist: [String] { Wordlist.effLong() }
+
     var body: some View {
         Form {
             Section {
@@ -45,6 +47,8 @@ struct CreateNoteView: View {
 
             Section {
                 TextEditor(text: $noteBody)
+                    // No keyboard learning from what's typed here (L-23).
+                    .autocorrectionDisabled()
                     .frame(minHeight: 200)
                     .font(AgePonyTypography.body)
             } header: {
@@ -70,6 +74,19 @@ struct CreateNoteView: View {
                 Toggle("Show passphrase", isOn: $showPassphrase)
                     .font(AgePonyTypography.footnote)
 
+                if !wordlist.isEmpty {
+                    Button {
+                        if let phrase = try? Diceware.generate(words: wordlist), !phrase.isEmpty {
+                            passphrase = phrase
+                            passphraseConfirm = phrase
+                            showPassphrase = true
+                        }
+                    } label: {
+                        Label("Generate a passphrase", systemImage: "wand.and.stars")
+                            .font(AgePonyTypography.footnote)
+                    }
+                }
+
                 if !passphraseConfirm.isEmpty && passphrase != passphraseConfirm {
                     Text("Passphrases don't match.")
                         .font(AgePonyTypography.caption)
@@ -78,7 +95,7 @@ struct CreateNoteView: View {
             } header: {
                 Text("Passphrase")
             } footer: {
-                Text("Use a long passphrase you'll remember. scrypt's work factor 2^18 makes brute-force attacks expensive, but it can't help against a guessable phrase.")
+                Text("Use a long passphrase you'll remember. scrypt's work factor (2^16) makes brute-force attacks expensive, but it can't help against a guessable phrase.")
             }
 
             Section {

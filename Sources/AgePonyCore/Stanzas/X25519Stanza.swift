@@ -30,6 +30,8 @@ public enum X25519Error: Error, Equatable {
     case invalidEphemeral
     case invalidWrappedKey
     case decryptFailed
+    /// The recipient is a low-order point: encrypting to it would give a file anyone can open.
+    case lowOrderPublicKey
 }
 
 public struct X25519Recipient: AgeRecipient {
@@ -50,7 +52,12 @@ public struct X25519Recipient: AgeRecipient {
         let ephemeralPriv = Curve25519.KeyAgreement.PrivateKey()
         let ephemeralPub = ephemeralPriv.publicKey
         let theirPub = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: publicKey)
-        let shared = try ephemeralPriv.sharedSecretFromKeyAgreement(with: theirPub)
+        // A low-order recipient gives an all-zero shared secret and a file anyone can open.
+        // CryptoKit may throw for it or return zeros; refuse either way.
+        guard let shared = try? ephemeralPriv.sharedSecretFromKeyAgreement(with: theirPub),
+              !X25519Identity.isAllZero(shared) else {
+            throw X25519Error.lowOrderPublicKey
+        }
 
         let salt = ephemeralPub.rawRepresentation + publicKey
         let wrapKey = shared.hkdfDerivedSymmetricKey(
@@ -85,6 +92,10 @@ public struct X25519Identity: AgeIdentity {
         try self.init(privateKey: Data(bytes))
     }
 
+    static func isAllZero(_ secret: SharedSecret) -> Bool {
+        secret.withUnsafeBytes { raw in raw.reduce(UInt8(0)) { $0 | $1 } == 0 }
+    }
+
     /// Generate a fresh X25519 identity.
     public static func generate() -> X25519Identity {
         let priv = Curve25519.KeyAgreement.PrivateKey()
@@ -113,10 +124,15 @@ public struct X25519Identity: AgeIdentity {
             return nil
         }
         guard ephemeralPubData.count == 32 else { return nil }
+        // Wrapped file key is 16 + 16 bytes; anything else isn't ours (audit L-5).
+        guard stanza.body.count == 32 else { return nil }
 
         let myPriv = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKey)
-        let theirPub = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralPubData)
-        let shared = try myPriv.sharedSecretFromKeyAgreement(with: theirPub)
+        guard let theirPub = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralPubData) else { return nil }
+        // A low-order ephemeral share is "not for me" (audit L-14), whether CryptoKit
+        // throws for it or returns an all-zero secret.
+        guard let shared = try? myPriv.sharedSecretFromKeyAgreement(with: theirPub),
+              !Self.isAllZero(shared) else { return nil }
 
         let salt = ephemeralPubData + publicKey
         let wrapKey = shared.hkdfDerivedSymmetricKey(

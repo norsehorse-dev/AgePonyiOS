@@ -1,0 +1,7 @@
+AgePony has no account, no login and no server. Everything works on the device.
+
+Local network (new in 5.0.1): AgePony uses the local network only for Settings > Send keys to another device / Receive keys from another device, which moves the user's own encryption keys between two of their phones on the same Wi-Fi. The receiving phone shows a QR code with its local address; the sending phone connects to that address directly. No Bonjour, no scanning, and only data encrypted to the receiving phone's one-time key crosses the network. Testing it needs two devices running AgePony 5.0.1; without shared Wi-Fi the screens offer a file to move by AirDrop or Files instead.
+
+NFC is used to talk to an external hardware security key (FIDO signing, and PIV decryption). Those features are optional and the rest of the app works without one.
+
+The only internet request is fetching a GitHub user's public SSH keys when the user asks for it.

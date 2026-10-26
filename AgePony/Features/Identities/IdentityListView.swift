@@ -94,16 +94,14 @@ private struct IdentityRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: iconName)
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
-                .frame(width: 28)
+            KeyAvatarView(seed: identity.publicKeyMaterial.base64EncodedString(),
+                          name: identity.name, size: 34)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(identity.name)
                         .font(AgePonyTypography.bodyEmph)
-                    if identity.type == .postQuantum {
+                    if identity.type == .postQuantum || identity.type == .secureEnclaveTagPQ {
                         PostQuantumBadge(compact: true)
                     }
                     if isActive {
@@ -125,17 +123,6 @@ private struct IdentityRow: View {
             }
         }
         .padding(.vertical, 4)
-    }
-
-    private var iconName: String {
-        switch identity.type {
-        case .x25519:    return "key.fill"
-        case .sshEd25519: return "lock.shield"
-        case .sshRSA:    return "lock.shield"
-        case .secureEnclaveP256: return "cpu"
-        case .skEd25519, .skEcdsaP256: return "key.radiowaves.forward"
-        case .postQuantum: return "atom"
-        }
     }
 
     private var shortFingerprint: String {

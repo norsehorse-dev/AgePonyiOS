@@ -62,6 +62,9 @@ public enum SSHSigError: Error, Equatable {
     case malformedMessageHash
     case namespaceMismatch(expected: String, found: String)
     case signatureInvalid
+    /// A security-key signature without the user-presence (touch) flag, from a signer
+    /// whose allowed_signers entry doesn't say `no-touch-required` (audit L-7).
+    case userPresenceRequired
     case signingFailed(String)
 }
 

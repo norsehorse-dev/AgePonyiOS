@@ -73,13 +73,16 @@ public enum FileEncryptor {
         let scoped = inputURL.startAccessingSecurityScopedResource()
         defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
 
-        guard let rawInput = InputStream(url: inputURL) else {
+        let resolved = try resolveStreamableFile(inputURL)
+        defer { if resolved.isTemporary { try? FileManager.default.removeItem(at: resolved.url) } }
+
+        guard let rawInput = InputStream(url: resolved.url) else {
             throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)
         }
 
         return try encrypt(
             source: rawInput,
-            totalBytes: fileSize(of: inputURL),
+            totalBytes: fileSize(of: resolved.url),
             outputName: inputURL.lastPathComponent + ".age",
             recipients: recipients,
             passphrase: passphrase,
@@ -177,8 +180,17 @@ public enum FileEncryptor {
         /// signature and the digests taken while the payload streamed past, which is
         /// everything verification needs -- the payload itself is gone by then.
         public let signedBundle: SignedBundle.StreamParsed?
+        /// The file's `agepony.com/sig` header stanza, read three ways (5.0.1). Verify
+        /// it against `url` with `FileVerifier.verify(stanza:plaintextURL:...)`: the
+        /// plaintext is already written, so an unreadable or failing one must be
+        /// shown loudly, never as unsigned (audit L-9).
+        public var signatureStanza: SignatureStanza.Opening = .absent
 
-        public var isSigned: Bool { signedBundle != nil }
+        public var isSigned: Bool {
+            if signedBundle != nil { return true }
+            if case .absent = signatureStanza { return false }
+            return true
+        }
     }
 
     /// Decrypt `inputURL` to a temp file, streaming throughout.
@@ -236,8 +248,9 @@ public enum FileEncryptor {
         unwrapper?.open()
         let destination: OutputStream = unwrapper ?? output
 
+        var stanza: SignatureStanza.Opening = .absent
         do {
-            try Age.decryptStream(ciphertext: source, identities: readers, into: destination)
+            stanza = try Age.decryptStream(ciphertext: source, identities: readers, into: destination)
             try unwrapper?.finish()
         } catch {
             cleanupTempFile(at: outURL)
@@ -276,7 +289,7 @@ public enum FileEncryptor {
             }
         }
 
-        return DecryptOutcome(url: finalURL, signedBundle: parsed)
+        return DecryptOutcome(url: finalURL, signedBundle: parsed, signatureStanza: stanza)
     }
 
     // MARK: - Multi-file
@@ -314,13 +327,25 @@ public enum FileEncryptor {
         let scopedURLs = inputURLs.filter { $0.startAccessingSecurityScopedResource() }
         defer { scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() } }
 
+        // Packages (.numbers, .pages, .key, and similar bundle documents) are
+        // directories on disk even though Files.app shows them as one document;
+        // resolve each to a flat, streamable copy up front, before the lazy
+        // entries below are built.
+        let resolvedInputs = try inputURLs.map { try resolveStreamableFile($0) }
+        defer {
+            for resolved in resolvedInputs where resolved.isTemporary {
+                try? FileManager.default.removeItem(at: resolved.url)
+            }
+        }
+
         var entries: [TarArchive.StreamEntry] = []
         entries.reserveCapacity(inputURLs.count)
-        for url in inputURLs {
-            let size = fileSize(of: url)
-            let name = url.lastPathComponent
+        for (original, resolved) in zip(inputURLs, resolvedInputs) {
+            let size = fileSize(of: resolved.url)
+            let name = original.lastPathComponent
+            let flatURL = resolved.url
             entries.append(TarArchive.StreamEntry(name: name, size: size) {
-                InputStream(url: url) ?? InputStream(data: Data())
+                InputStream(url: flatURL) ?? InputStream(data: Data())
             })
         }
 
@@ -365,7 +390,9 @@ public enum FileEncryptor {
 
         do {
             for url in inputURLs {
-                guard let input = InputStream(url: url) else {
+                let resolved = try resolveStreamableFile(url)
+                defer { if resolved.isTemporary { try? FileManager.default.removeItem(at: resolved.url) } }
+                guard let input = InputStream(url: resolved.url) else {
                     throw FileEncryptorError.cannotOpenInput(url.lastPathComponent)
                 }
                 input.open()
@@ -373,7 +400,7 @@ public enum FileEncryptor {
                 try TarArchive.writeEntry(
                     to: output,
                     name: url.lastPathComponent,
-                    size: fileSize(of: url),
+                    size: fileSize(of: resolved.url),
                     from: input
                 )
             }
@@ -496,6 +523,70 @@ public enum FileEncryptor {
     private static func fileSize(of url: URL) -> Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    /// Resolve a user-picked URL to something safe to open as a byte stream.
+    ///
+    /// Some document types -- `.numbers`, `.pages`, `.key`, and other bundle
+    /// formats -- are directories on disk even though Files.app presents them
+    /// as a single document. `InputStream(url:)` opens a directory without
+    /// complaint, but the first `read()` fails (EISDIR), which is exactly
+    /// what `AgePayloadError.streamReadFailed` reported: not a broken file,
+    /// a directory being read as if it were one. The directory's own tiny
+    /// stat size is also what was showing up as the file size in the UI.
+    ///
+    /// For a directory/package URL, this asks the file coordinator for the
+    /// flattened, single-file representation iOS already knows how to
+    /// produce -- `.forUploading` is the option Mail, AirDrop, and every
+    /// other app that only reads one file uses for exactly this. The result
+    /// is copied out to a private temp location, since the coordinator's own
+    /// copy is not guaranteed to outlive the accessor closure.
+    ///
+    /// For an ordinary file, the URL is returned unchanged and `isTemporary`
+    /// is false, so callers only clean up what this function actually made.
+    private static func resolveStreamableFile(_ url: URL) throws -> (url: URL, isTemporary: Bool) {
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+        guard isDirectory else {
+            return (url, false)
+        }
+
+        var coordinatorError: NSError?
+        var flattenedURL: URL?
+        var copyError: Error?
+
+        NSFileCoordinator().coordinate(
+            readingItemAt: url,
+            options: [.forUploading],
+            error: &coordinatorError
+        ) { zippedURL in
+            do {
+                let dest = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("AgePonyFlatten-\(UUID().uuidString.prefix(8))", isDirectory: true)
+                try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+                let destFile = dest.appendingPathComponent(zippedURL.lastPathComponent)
+                try FileManager.default.copyItem(at: zippedURL, to: destFile)
+                flattenedURL = destFile
+            } catch {
+                copyError = error
+            }
+        }
+
+        if let coordinatorError {
+            throw FileEncryptorError.readFailed(
+                "\(url.lastPathComponent) is a package and couldn't be flattened for reading: \(coordinatorError.localizedDescription)"
+            )
+        }
+        if let copyError {
+            throw FileEncryptorError.readFailed(
+                "\(url.lastPathComponent) is a package and couldn't be flattened for reading: \(String(describing: copyError))"
+            )
+        }
+        guard let flattenedURL else {
+            throw FileEncryptorError.readFailed(
+                "\(url.lastPathComponent) is a package and couldn't be flattened for reading."
+            )
+        }
+        return (flattenedURL, true)
     }
 
     private static func plaintextName(for sourceName: String) -> String {
@@ -627,5 +718,61 @@ final class ProgressInputStream: InputStream {
         guard let report, consumed != lastReported else { return }
         lastReported = consumed
         report(consumed, total)
+    }
+}
+
+// MARK: - Signed encrypt, sig stanza v2 (5.0.1)
+
+extension FileEncryptor {
+
+    /// Encrypt `inputURL` with a v2 `agepony.com/sig` stanza carrying
+    /// `signatureArmored`, streaming. `prepared` already holds the wrapped file key
+    /// the signature covers; `plaintextSHA512` is the hash it was made over. The
+    /// file is read a second time here and hashed again on the way through: if it
+    /// changed between the two reads the output is removed and this throws, since
+    /// its signature would not verify.
+    public static func encryptSigned(
+        prepared: SignedEncryption,
+        inputURL: URL,
+        plaintextSHA512: Data,
+        signatureArmored: String,
+        armor: Bool,
+        progress: FileProgressHandler? = nil
+    ) throws -> URL {
+        let scoped = inputURL.startAccessingSecurityScopedResource()
+        defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
+
+        let outURL = try freshTempURL(named: inputURL.lastPathComponent + ".age")
+        guard let source = InputStream(url: inputURL) else {
+            cleanupTempFile(at: outURL)
+            throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)
+        }
+        guard let output = OutputStream(url: outURL, append: false) else {
+            cleanupTempFile(at: outURL)
+            throw FileEncryptorError.cannotOpenOutput(outURL.lastPathComponent)
+        }
+
+        let input = ProgressInputStream(source, total: fileSize(of: inputURL), report: progress)
+        input.open()
+        output.open()
+        defer { input.close(); output.close() }
+
+        do {
+            if armor {
+                let sink = try AgeArmor.EncodingSink(output)
+                try prepared.encryptStream(plaintext: input, plaintextSHA512: plaintextSHA512,
+                                           signatureArmored: signatureArmored, into: sink)
+                try sink.finish()
+            } else {
+                try prepared.encryptStream(plaintext: input, plaintextSHA512: plaintextSHA512,
+                                           signatureArmored: signatureArmored, into: output)
+            }
+        } catch {
+            cleanupTempFile(at: outURL)
+            throw FileEncryptorError.ageError(String(describing: error))
+        }
+
+        try protectFile(at: outURL)
+        return outURL
     }
 }

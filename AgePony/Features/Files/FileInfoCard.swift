@@ -29,7 +29,7 @@ struct FileInfoCard: View {
             HStack(spacing: 16) {
                 metaLabel(title: "Size", value: sizeString)
                 metaLabel(title: "Format", value: summary.armored ? "PEM-armored" : "Binary")
-                metaLabel(title: "Recipients", value: "\(summary.stanzas.count)")
+                metaLabel(title: "Recipients", value: "\(summary.recipientCount)")
                 Spacer()
             }
 
@@ -105,6 +105,10 @@ struct FileInfoCard: View {
         case .sshRSA:      return "lock.shield"
         case .scrypt:      return "lock.rectangle"
         case .postQuantum: return "atom"
+        case .yubikey:     return "key"
+        case .tag:         return "cpu"
+        case .tagPQ:       return "cpu"
+        case .signature:   return "signature"
         case .unknown:     return "questionmark.circle"
         }
     }

@@ -7,6 +7,13 @@
 //  the identity is saved, calls back to RootView so the home screen can
 //  take over.
 //
+//  A phone with no passcode (5.0.1, plan 2.8): iOS refuses a Keychain item
+//  behind Face ID / Touch ID / the passcode, which is what the default lock
+//  uses, so setup used to stop on a bare "KeychainError error 0". Setup now
+//  checks first and says so plainly, and offers an AgePony password or PIN
+//  instead: the vault key is then wrapped under that secret only (No lock mode
+//  plus a password, M-3).
+//
 
 import SwiftUI
 
@@ -17,9 +24,14 @@ struct OnboardingView: View {
 
     @State private var stage: Stage = .welcome
     @State private var bootstrapError: String?
+    @State private var showSetPassword = false
+    @State private var showPasswordOnlySetup = false
+    @State private var working = false
 
     enum Stage {
         case welcome
+        case noPasscode
+        case lockSetup
         case choice
         case generate
         case importExisting
@@ -30,6 +42,18 @@ struct OnboardingView: View {
             switch stage {
             case .welcome:
                 WelcomeStage(onContinue: bootstrapAndContinue)
+            case .noPasscode:
+                NoPasscodeStage(
+                    working: working,
+                    onCheckAgain: bootstrapAndContinue,
+                    onUsePassword: { showPasswordOnlySetup = true }
+                )
+            case .lockSetup:
+                LockSetupStage(
+                    biometricWord: biometricWord,
+                    onBiometric: { stage = .choice },
+                    onSetPassword: { showSetPassword = true }
+                )
             case .choice:
                 ChoiceStage(
                     onGenerate: { stage = .generate },
@@ -39,6 +63,23 @@ struct OnboardingView: View {
                 GenerateIdentityView(vault: vault, onDone: onComplete)
             case .importExisting:
                 ImportIdentityView(vault: vault, onDone: onComplete)
+            }
+        }
+        .sheet(isPresented: $showSetPassword) {
+            SecretEntrySheet(title: "Set a password or PIN", kind: .password, allowKindChange: true) { secret, kind in
+                Task {
+                    do {
+                        try await vault.setAppPassword(secret, kind: kind)
+                        stage = .choice
+                    } catch {
+                        bootstrapError = error.localizedDescription
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showPasswordOnlySetup) {
+            SecretEntrySheet(title: "Set a password or PIN", kind: .password, allowKindChange: true) { secret, kind in
+                setUpPasswordOnly(secret: secret, kind: kind)
             }
         }
         .alert("Couldn't initialize AgePony", isPresented: Binding(
@@ -52,13 +93,47 @@ struct OnboardingView: View {
     }
 
     private func bootstrapAndContinue() {
+        // Without a passcode the default lock can't be stored at all (plan 2.8).
+        guard BiometricGate.devicePasscodeIsSet() else {
+            stage = .noPasscode
+            return
+        }
         Task {
             do {
                 try await vault.bootstrap()
-                stage = .choice
+                stage = .lockSetup
             } catch {
                 bootstrapError = error.localizedDescription
             }
+        }
+    }
+
+    /// A vault opened only by an AgePony password or PIN, for a phone with no
+    /// passcode. The key goes into the Keychain with no ACL just long enough for
+    /// the password to wrap it; setting the password removes that copy (M-3).
+    /// If anything fails part way, the half-made vault is removed, so there is
+    /// never an unprotected one.
+    private func setUpPasswordOnly(secret: String, kind: UnlockSecretKind) {
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                try await vault.bootstrap(lockMode: .none)
+                try await vault.setAppPassword(secret, kind: kind)
+                stage = .choice
+            } catch {
+                try? vault.reset()
+                bootstrapError = error.localizedDescription
+            }
+        }
+    }
+
+    private var biometricWord: String {
+        switch BiometricGate.availableBiometric() {
+        case .faceID:  return "Face ID"
+        case .touchID: return "Touch ID"
+        case .opticID: return "Optic ID"
+        case .none:    return "device passcode"
         }
     }
 }
@@ -111,6 +186,106 @@ private struct BulletRow: View {
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+// MARK: - No passcode (plan 2.8)
+
+private struct NoPasscodeStage: View {
+    let working: Bool
+    let onCheckAgain: () -> Void
+    let onUsePassword: () -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 12) {
+                Image(systemName: "lock.slash")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundStyle(AgePonyColors.tealCore)
+                Text("This iPhone has no passcode")
+                    .font(AgePonyTypography.title)
+                    .multilineTextAlignment(.center)
+                Text("AgePony normally locks your vault with Face ID, Touch ID or your passcode. iOS only allows that when the iPhone has a passcode, so that lock isn't available here.")
+                    .font(AgePonyTypography.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Text("Set a passcode in Settings › Face ID & Passcode and come back, or protect AgePony with its own password or PIN.")
+                    .font(AgePonyTypography.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+
+            Spacer()
+
+            VStack(spacing: 14) {
+                Button("Use an AgePony password or PIN", action: onUsePassword)
+                    .buttonStyle(.agePonyPrimary)
+                    .disabled(working)
+
+                Button("I've set a passcode, check again", action: onCheckAgain)
+                    .buttonStyle(.agePonySecondary)
+                    .disabled(working)
+
+                if working {
+                    ProgressView()
+                }
+
+                Text("Without a passcode, anyone holding the unlocked phone can open its apps. The AgePony password is then the only thing in front of your keys, so make it a strong one.")
+                    .font(AgePonyTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 40)
+        }
+        .navigationTitle("Setup")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Lock setup
+
+private struct LockSetupStage: View {
+    let biometricWord: String
+    let onBiometric: () -> Void
+    let onSetPassword: () -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 8) {
+                Text("How AgePony unlocks")
+                    .font(AgePonyTypography.title)
+                Text("Your vault is protected on this device. Choose how you unlock it — you can change this anytime in Settings, including adding a duress password.")
+                    .font(AgePonyTypography.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+            .padding(.top, 24)
+
+            Spacer()
+
+            VStack(spacing: 14) {
+                Button("Continue with \(biometricWord)", action: onBiometric)
+                    .buttonStyle(.agePonyPrimary)
+
+                Button("Set a password or PIN", action: onSetPassword)
+                    .buttonStyle(.agePonySecondary)
+
+                Text("A password works with or without biometrics, and is required before you can set a duress password.")
+                    .font(AgePonyTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 40)
+        }
+        .navigationTitle("Setup")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

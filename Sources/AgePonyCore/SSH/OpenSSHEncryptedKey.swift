@@ -153,7 +153,9 @@ public enum OpenSSHEncryptedKey {
         var reader = SSHWireReader(kdfopts)
         let salt = try reader.readString()
         let rounds = try reader.readUInt32()
-        guard !salt.isEmpty else { throw OpenSSHEncryptedKeyError.malformedKDFOpts }
+        guard !salt.isEmpty, salt.count <= BcryptPBKDF.maxSaltLength else { throw OpenSSHEncryptedKeyError.malformedKDFOpts }
+        // Refused before any KDF work (audit L-10).
+        guard rounds >= 1, Int(rounds) <= BcryptPBKDF.maxRounds else { throw OpenSSHEncryptedKeyError.malformedKDFOpts }
         return (salt, Int(rounds))
     }
 

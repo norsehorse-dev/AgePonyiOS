@@ -193,8 +193,9 @@ public extension AgeArmor {
 /// armored file can be handed straight to a binary reader — `Age.decryptStream`, say —
 /// without being decoded whole first.
 ///
-/// Accepts what `AgeArmor.decode` accepts: CRLF, trailing whitespace, and blank lines
-/// around the markers. `close()` leaves the wrapped stream open, since its lifecycle
+/// Accepts exactly what `AgeArmor.decode` accepts (the same `ArmorLineParser`), and
+/// caps each raw line at 4 KiB while reading, so newline-free input fails fast instead
+/// of filling memory. `close()` leaves the wrapped stream open, since its lifecycle
 /// belongs to the caller.
 ///
 /// This subclasses `InputStream` rather than exposing a plain read method because the
@@ -202,12 +203,9 @@ public extension AgeArmor {
 /// a class cluster, so every member the streaming code touches is overridden below.
 public final class ArmorDecodingSource: InputStream {
     private let lines: ArmorLineReader
-    private var pending = ""
+    private var parser = ArmorLineParser()
     private var buffer = Data()
     private var bufferPos = 0
-    private var sawBegin = false
-    private var sawEnd = false
-    private var sawPadding = false
     private var exhausted = false
 
     private var status: Stream.Status = .notOpen
@@ -298,53 +296,17 @@ public final class ArmorDecodingSource: InputStream {
     }
 
     private func nextChunk() throws -> Data {
+        var out = Data()
         while true {
             guard let raw = try lines.nextLine() else {
-                if !sawBegin { throw AgeArmorError.missingBeginMarker }
-                if !sawEnd { throw AgeArmorError.missingEndMarker }
+                // Reading continues past END so trailing junk is still rejected.
+                try parser.end()
                 exhausted = true
-                return try decodePending(all: true)
+                return out
             }
-            let line = raw.trimmingCharacters(in: .whitespaces)
-
-            if !sawBegin {
-                if line.isEmpty { continue }
-                guard line == AgeArmor.beginMarker else { throw AgeArmorError.missingBeginMarker }
-                sawBegin = true
-                continue
-            }
-
-            if !sawEnd {
-                // Reading continues past END so trailing junk is still rejected, the way
-                // decode() rejects it by requiring END to be the last meaningful line.
-                if line == AgeArmor.endMarker { sawEnd = true; continue }
-                if line == AgeArmor.beginMarker { throw AgeArmorError.extraDataOutsideArmor }
-                if line.isEmpty { continue }
-                // Padding means the final group; anything after it is malformed.
-                if sawPadding { throw AgeArmorError.invalidBase64 }
-                pending += line
-                if pending.count >= AgeArmor.flushAt {
-                    let chunk = try decodePending(all: false)
-                    if !chunk.isEmpty { return chunk }
-                }
-                continue
-            }
-
-            if !line.isEmpty { throw AgeArmorError.extraDataOutsideArmor }
+            try parser.line(Substring(raw), into: &out)
+            if out.count >= AgeArmor.flushAt { return out }
         }
-    }
-
-    private func decodePending(all: Bool) throws -> Data {
-        // Only whole 4-character base64 quanta can be decoded mid-stream.
-        let take = all ? pending.count : pending.count - (pending.count % 4)
-        if take == 0 { return Data() }
-        let chunk = String(pending.prefix(take))
-        pending.removeFirst(take)
-        if chunk.contains("=") { sawPadding = true }
-        guard let decoded = Data(base64Encoded: chunk, options: []) else {
-            throw AgeArmorError.invalidBase64
-        }
-        return decoded
     }
 }
 
@@ -364,10 +326,12 @@ final class ArmorLineReader {
     func nextLine() throws -> String? {
         while true {
             if let nl = buffer.firstIndex(of: 0x0A) {
+                guard nl - buffer.startIndex <= ArmorLineParser.maxRawLine else { throw AgeArmorError.lineTooLong }
                 let lineData = Data(buffer[buffer.startIndex..<nl])
                 buffer = Data(buffer[(nl + 1)...])
                 return decode(lineData)
             }
+            if buffer.count > ArmorLineParser.maxRawLine { throw AgeArmorError.lineTooLong }
             if atEOF {
                 if buffer.isEmpty { return nil }
                 let lineData = buffer
@@ -381,7 +345,7 @@ final class ArmorLineReader {
 
     private func decode(_ data: Data) -> String {
         var d = data
-        if d.last == 0x0D { d = Data(d.dropLast()) }   // CRLF
+        if d.last == 0x0D { d = Data(d.dropLast()) }   // CRLF (the parser trims it too)
         return String(decoding: d, as: UTF8.self)
     }
 }

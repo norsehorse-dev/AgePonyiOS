@@ -105,6 +105,13 @@ public struct Field25519: Equatable, Sendable {
         return Field25519(limbs: l)
     }
 
+    /// Fully reduced into [0, p). A 256-bit limb value can be as large as 2p + 37, so one
+    /// conditional subtraction isn't always enough.
+    public func reduced() -> Field25519 { canonical().canonical() }
+
+    /// True if this value, as given, is already below p.
+    public var isCanonical: Bool { canonical().limbs == limbs }
+
     // MARK: - Add
 
     public static func + (a: Field25519, b: Field25519) -> Field25519 {
@@ -143,7 +150,11 @@ public struct Field25519: Equatable, Sendable {
 
     // MARK: - Subtract
 
-    public static func - (a: Field25519, b: Field25519) -> Field25519 {
+    public static func - (lhs: Field25519, rhs: Field25519) -> Field25519 {
+        // Reduce both first: with a, b < p, a - b + p is in (0, 2p) and one addition of p
+        // after a borrow always lands right. Without it, b > a + p gave a result off by
+        // 38 (audit L-13).
+        let a = lhs.reduced(), b = rhs.reduced()
         var result = [UInt32](repeating: 0, count: 8)
         var borrow: Int64 = 0
         for i in 0..<8 {
@@ -269,6 +280,6 @@ public struct Field25519: Equatable, Sendable {
     // MARK: - Equatable
 
     public static func == (a: Field25519, b: Field25519) -> Bool {
-        a.canonical().limbs == b.canonical().limbs
+        a.reduced().limbs == b.reduced().limbs
     }
 }

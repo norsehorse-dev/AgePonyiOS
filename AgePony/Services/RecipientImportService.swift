@@ -61,6 +61,30 @@ public enum RecipientImportService {
             )
         }
 
+        // age1tag1... / age1tagpq1... (hardware keys, age 1.3) — before the
+        // plain age1 branch, which would take them for X25519.
+        if TagRecipient.isTagRecipient(trimmed) {
+            let recipient = try TagRecipient(ageRecipient: trimmed)
+            return RecipientImportCandidate(
+                type: recipient.isHybrid ? .tagPQ : .tag,
+                publicKeyMaterial: recipient.publicKey,
+                sshComment: nil,
+                defaultName: shortenedAgeName(trimmed)
+            )
+        }
+
+        // age1yubikey1... — checked before the plain age1 branch for the same
+        // reason as age1pq1: it also starts with "age1".
+        if trimmed.hasPrefix("age1yubikey1") {
+            let recipient = try P256Recipient(ageRecipient: trimmed)
+            return RecipientImportCandidate(
+                type: .yubikey,
+                publicKeyMaterial: recipient.compressedPublicKey,
+                sshComment: nil,
+                defaultName: shortenedAgeName(trimmed)
+            )
+        }
+
         // age1...
         if trimmed.hasPrefix("age1") {
             let recipient = try X25519Recipient(ageRecipient: trimmed)
@@ -121,19 +145,20 @@ public enum RecipientImportService {
     /// Fetch `https://github.com/<username>.keys` and return every parsable
     /// recipient. The crypto-core's `SSHKeySource.github` does the network
     /// + parsing in one call.
-    public static func fetchFromGitHub(username rawUsername: String) async throws -> [RecipientImportCandidate] {
+    public static func fetchFromGitHub(username rawUsername: String, proxy: ProxyConfig? = nil) async throws -> [RecipientImportCandidate] {
         let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !username.isEmpty, username.allSatisfy({ isValidUsernameChar($0) }) else {
             throw RecipientImportError.invalidUsername
         }
         let recipients: [any AgeRecipient]
         do {
-            recipients = try await SSHKeySource.github(username: username)
+            recipients = try await SSHKeySource.github(username: username, proxy: proxy)
         } catch let e as SSHKeySourceError {
             switch e {
             case .invalidURL:           throw RecipientImportError.invalidUsername
             case .fetchFailed(let s):   throw RecipientImportError.fetchFailed("HTTP \(s)")
             case .noUsableKeys:         throw RecipientImportError.noUsableKeysInResponse
+            case .proxyMisconfigured:   throw RecipientImportError.fetchFailed("The proxy needs a host and port")
             }
         } catch {
             throw RecipientImportError.fetchFailed(error.localizedDescription)

@@ -12,8 +12,10 @@
 //      (adds the com.apple.developer.nfc.readersession.formats entitlement).
 //    • Info.plist: NFCReaderUsageDescription (the scan-sheet prompt string).
 //    • Info.plist: com.apple.developer.nfc.readersession.iso7816.select-identifiers
-//      must contain the FIDO applet AID  A0000006472F0001 .  CoreNFC auto-selects
-//      it on tap, so the applet is already selected when we get the tag.
+//      must contain the FIDO applet AID  A0000006472F0001  and, for YubiKey
+//      decrypt (5.0.1), the PIV AID  A000000308 . CoreNFC auto-selects the first
+//      listed applet the key answers to; when that isn't the one a flow wants,
+//      `run(applet:)` selects it with a SELECT APDU before handing over.
 //
 //  CTAP2-over-NFC framing (FIDO CTAP §8.3):
 //    NFCCTAP_MSG        80 10 00 00 <ctap message> Le   — send a request
@@ -30,6 +32,9 @@ import CoreNFC
 /// and to confirm CoreNFC selected the right applet.
 public let fidoAppletAID = "A0000006472F0001"
 
+/// PIV applet AID (YubiKey decrypt, age-plugin-yubikey keys).
+public let pivAppletAID = "A000000308"
+
 public enum SecurityKeyError: Error, LocalizedError {
     case nfcUnavailable
     case wrongAppletSelected(String?)
@@ -40,6 +45,7 @@ public enum SecurityKeyError: Error, LocalizedError {
     case ctapError(UInt8)
     case pinAgreementNotP256
     case cancelled
+    case malformedCommand
 
     public var errorDescription: String? {
         switch self {
@@ -61,6 +67,8 @@ public enum SecurityKeyError: Error, LocalizedError {
             return "The key returned an unexpected key-agreement type."
         case .cancelled:
             return "Cancelled."
+        case .malformedCommand:
+            return "AgePony built a command the key can't take."
         }
     }
 
@@ -131,6 +139,70 @@ public final class SecurityKeyChannel {
         return Data(data.dropFirst())
     }
 
+    /// SELECT an applet by AID. Used when CoreNFC auto-selected a different one.
+    func select(aidHex: String) async throws {
+        guard let aid = Self.hexData(aidHex),
+              let apdu = NFCISO7816APDU(data: Data([0x00, 0xA4, 0x04, 0x00, UInt8(aid.count)]) + aid + Data([0x00])) else {
+            throw SecurityKeyError.malformedCommand
+        }
+        let (_, sw1, sw2) = try await send(apdu)
+        guard sw1 == 0x90, sw2 == 0x00 else {
+            throw SecurityKeyError.wrongAppletSelected(tag.initialSelectedAID)
+        }
+    }
+
+    /// Send a raw APDU and wait for the answer: response data followed by SW1 SW2,
+    /// as AgePonyCore's `PivCard` expects. Blocks the calling thread, so call it
+    /// off the main thread and never on the NFC session's queue (the answer is
+    /// delivered there). Retries once on a transient transceive glitch.
+    public func transmitBlocking(_ apdu: Data) throws -> Data {
+        guard let command = NFCISO7816APDU(data: apdu) else { throw SecurityKeyError.malformedCommand }
+        do {
+            return try sendBlocking(command)
+        } catch let e as NFCReaderError where SecurityKeyChannel.isTransientTransceiveError(e) {
+            Thread.sleep(forTimeInterval: 0.06)
+            return try sendBlocking(command)
+        }
+    }
+
+    private func sendBlocking(_ command: NFCISO7816APDU) throws -> Data {
+        let done = DispatchSemaphore(value: 0)
+        var result: Result<Data, Error> = .failure(SecurityKeyError.emptyResponse)
+        tag.sendCommand(apdu: command) { data, sw1, sw2, error in
+            if let error {
+                result = .failure(error)
+            } else {
+                result = .success(data + Data([sw1, sw2]))
+            }
+            done.signal()
+        }
+        if done.wait(timeout: .now() + 20) == .timedOut { throw SecurityKeyError.keepaliveTimedOut }
+        return try result.get()
+    }
+
+    private func send(_ apdu: NFCISO7816APDU) async throws -> (Data, UInt8, UInt8) {
+        try await withCheckedThrowingContinuation { cont in
+            tag.sendCommand(apdu: apdu) { respData, s1, s2, error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume(returning: (respData, s1, s2))
+                }
+            }
+        }
+    }
+
+    static func hexData(_ hex: String) -> Data? {
+        let chars = Array(hex)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data()
+        for i in stride(from: 0, to: chars.count, by: 2) {
+            guard let b = UInt8(String(chars[i...i + 1]), radix: 16) else { return nil }
+            out.append(b)
+        }
+        return out
+    }
+
     /// One APDU exchange, with a single automatic retry on a transient NFC
     /// transceive glitch. A dropped tag response (the "Tag response error"
     /// CoreNFC reports when a single transceive fails while the key is still in
@@ -194,6 +266,7 @@ public final class SecurityKeyTransport: NSObject, NFCTagReaderSessionDelegate {
 
     public static func run<T>(
         alertMessage: String,
+        applet: String = fidoAppletAID,
         body: @escaping (SecurityKeyChannel) async throws -> T
     ) async throws -> T {
         guard NFCTagReaderSession.readingAvailable else {
@@ -203,6 +276,11 @@ public final class SecurityKeyTransport: NSObject, NFCTagReaderSessionDelegate {
         let tag = try await transport.beginAndConnect()
         do {
             let channel = SecurityKeyChannel(tag: tag)
+            // CoreNFC selected the first applet in select-identifiers that the
+            // key answered to; switch if this flow wants the other one.
+            if tag.initialSelectedAID.uppercased() != applet.uppercased() {
+                try await channel.select(aidHex: applet)
+            }
             let result = try await body(channel)
             transport.end(message: nil)
             return result
@@ -262,13 +340,8 @@ public final class SecurityKeyTransport: NSObject, NFCTagReaderSessionDelegate {
                 self.resumeConnect(throwing: error)
                 return
             }
-            // CoreNFC auto-selected the AID from select-identifiers; confirm it.
-            let aid = iso.initialSelectedAID
-            guard aid.uppercased() == fidoAppletAID.uppercased() else {
-                session.invalidate(errorMessage: "That key has no FIDO applet.")
-                self.resumeConnect(throwing: SecurityKeyError.wrongAppletSelected(aid))
-                return
-            }
+            // CoreNFC auto-selected an AID from select-identifiers. `run`
+            // switches to the applet the flow wants if it's a different one.
             self.resumeConnect(returning: iso)
         }
     }

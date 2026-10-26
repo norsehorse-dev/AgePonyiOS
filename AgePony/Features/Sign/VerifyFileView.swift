@@ -83,7 +83,7 @@ struct VerifyFileView: View {
 
     private var canAddSigner: Bool {
         guard let result else { return false }
-        if case .validUnknownKey = result.trust, result.signerPublicKeyWire != nil {
+        if case .validUnknownKey = result.trust, result.signerPublicKeyWire != nil, result.untrustedSignerName == nil {
             return true
         }
         return false

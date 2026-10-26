@@ -33,6 +33,10 @@ public extension StoredRecipient {
             return try SSHRSARecipient(sshPublicKeyLine: line)
         case .postQuantum:
             return try HybridRecipient(publicKey: publicKeyMaterial)
+        case .yubikey:
+            return try P256Recipient(compressedPublicKey: publicKeyMaterial)
+        case .tag, .tagPQ:
+            return try TagRecipient(publicKey: publicKeyMaterial)
         }
     }
 
@@ -54,6 +58,10 @@ public extension StoredRecipient {
             return "ssh-rsa \(b64)" + (sshComment.map { " \($0)" } ?? "")
         case .postQuantum:
             return Bech32.encodePostQuantumRecipient(Array(publicKeyMaterial))
+        case .yubikey:
+            return Bech32.encodeYubiKeyRecipient(Array(publicKeyMaterial))
+        case .tag, .tagPQ:
+            return (try? TagRecipient(publicKey: publicKeyMaterial).toBech32()) ?? "(invalid hardware key)"
         }
     }
 

@@ -19,6 +19,7 @@
 //
 
 import Foundation
+import CryptoKit
 
 public enum SSHKeyError: Error, Equatable {
     case malformedPublicKeyLine
@@ -34,6 +35,8 @@ public enum SSHKeyError: Error, Equatable {
     case wrongKeyType(String)
     case invalidPublicKeyLength
     case invalidPrivateKeyLength
+    /// The private key's parts don't belong together (seed vs public key, inner vs outer).
+    case inconsistentKey
 }
 
 /// A parsed SSH public key in a form we can use as an age recipient.
@@ -151,9 +154,8 @@ public enum SSHKey {
         let publicBlob = try reader.readString()
         let privateBlob = try reader.readString()
 
-        // The publicBlob is in SSH wire format and we don't need anything from it
-        // here beyond optional cross-check; trust the private section.
-        _ = publicBlob
+        // The public blob is cross-checked against the private section below, so a key
+        // whose halves don't belong together is refused rather than imported.
 
         // The private section, since cipher = "none", is plaintext and laid out as:
         //   uint32(checkint1)
@@ -176,8 +178,16 @@ public enum SSHKey {
             // Ed25519 OpenSSH private key blob is 64 bytes: seed(32) || pub(32).
             guard privBlob.count == 64 else { throw SSHKeyError.invalidPrivateKeyLength }
             let seed = privBlob.prefix(32)
-            // Sanity check: the trailing 32 bytes should match the public key.
-            // (Not strictly required for use, but a parser quirk would surface here.)
+            // Consistency: the seed derives the public key, which is also the blob's tail
+            // and the outer public key.
+            var outer = SSHWireWriter()
+            outer.writeString("ssh-ed25519")
+            outer.writeString(pub)
+            guard privBlob.suffix(32) == pub, publicBlob == outer.data,
+                  let derived = try? Curve25519.Signing.PrivateKey(rawRepresentation: seed),
+                  derived.publicKey.rawRepresentation == pub else {
+                throw SSHKeyError.inconsistentKey
+            }
             let comment = String(data: try inner.readString(), encoding: .utf8)
             return SSHPrivateKey(
                 type: .ed25519(seed: Data(seed), publicKey: pub),

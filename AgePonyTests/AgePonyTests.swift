@@ -103,8 +103,9 @@ struct AgePonyTests {
         #expect(outcome.signerFingerprint?.hasPrefix("SHA256:") == true)
     }
 
-    /// A signature from a key saved as a recipient verifies as trusted (not own).
-    @Test func fileVerifierTrustsRecipient() async throws {
+    /// A signature from a key saved only as a recipient is valid but not trusted
+    /// (5.0.1, audit M-9): recipients are never trusted as signers.
+    @Test func fileVerifierDoesNotTrustRecipient() async throws {
         let (_, seed, pub) = makeEd25519Identity(name: "ignored")
         let recipient = StoredRecipient(
             name: "Alice",
@@ -121,7 +122,7 @@ struct AgePonyTests {
             identities: [],
             recipients: [recipient]
         )
-        #expect(outcome.trust == .trusted(signerName: "Alice", isOwnIdentity: false))
+        #expect(outcome.trust == .validUnknownKey)
     }
 
     /// A valid signature from a key the vault doesn't know is "valid, unknown".
@@ -234,11 +235,12 @@ struct AgePonyTests {
         #expect(outcome.signerPublicKeyWire == SSHSig.ed25519PublicKeyWire(pub))
     }
 
-    // MARK: - SignEncryptService (C3)
+    // MARK: - SignEncryptService (C3, 5.0.1 formats)
 
-    /// Sign-then-encrypt: one file goes out, and what it decrypts to is a signed
-    /// bundle whose signature covers the *plaintext*, not the ciphertext.
-    @Test func signEncryptProducesOneFileCarryingItsSignature() async throws {
+    /// Sign-then-encrypt to a key: one file goes out, and it is a plain age file
+    /// (plain age returns the original bytes) carrying a v2 signature stanza over
+    /// the plaintext and the recipient stanzas (5.0.1, audit L-8).
+    @Test func signEncryptToKeyWritesSignatureStanzaV2() async throws {
         let (signer, _, signerPub) = makeEd25519Identity(name: "Signer")
         let x = X25519Identity.generate()
         let recipient = try X25519Recipient(publicKey: x.publicKey)
@@ -266,32 +268,18 @@ struct AgePonyTests {
         )
         #expect(siblings == [out.encryptedURL.lastPathComponent])
 
-        // The ciphertext decrypts to a bundle, not to the plaintext directly.
+        // Plain age gives back the bytes themselves, with no wrapper.
         let ageBytes = try Data(contentsOf: out.encryptedURL)
-        let inner = try Age.decrypt(ciphertext: ageBytes, identities: [x])
-        #expect(inner != plaintext)
-        #expect(SignedBundle.looksLikeBundle(inner))
+        let recovered = try Age.decryptAndRecoverSignature(ciphertext: ageBytes, identities: [x])
+        #expect(recovered.plaintext == plaintext)
 
-        let bundle = try #require(SignedBundle.parse(inner))
-        #expect(bundle.name == tmp.lastPathComponent)
-        #expect(bundle.payload == plaintext)
-
-        // The signature covers the plaintext.
-        let v = try SSHSigVerifier.verify(
-            message: plaintext,
-            armoredSignature: bundle.signatureArmored,
-            expectedNamespace: SSHSig.defaultNamespace
-        )
+        // The header's signature stanza is v2 and verifies over that plaintext.
+        let opened = try #require(recovered.signature.opened)
+        #expect(opened.version == 2)
+        #expect(opened.coversRecipients)
+        let v = try opened.verify(plaintext: plaintext)
         #expect(v.publicKeyWire == SSHSig.ed25519PublicKeyWire(signerPub))
-
-        // And not the ciphertext -- the 2.0 shape is genuinely gone.
-        #expect(throws: SSHSigError.signatureInvalid) {
-            _ = try SSHSigVerifier.verify(
-                message: ageBytes,
-                armoredSignature: bundle.signatureArmored,
-                expectedNamespace: SSHSig.defaultNamespace
-            )
-        }
+        #expect(v.namespace == SignatureStanza.namespaceV2)
     }
 
     /// An X25519 identity can't be a signing identity for the combined flow.
@@ -321,16 +309,12 @@ struct AgePonyTests {
         }
     }
 
-    // MARK: - Sign-then-encrypt, all the way back (10c)
+    // MARK: - Sign-then-encrypt, all the way back (10c, 5.0.1)
 
-    /// The whole 3.0 shape end to end, through the real services: sign, encrypt,
-    /// decrypt, verify.
-    ///
-    /// The encrypted file is renamed before decrypting, so the original filename
-    /// can only come from the bundle's manifest -- stripping `.age` would give
-    /// "opaque", not "quarterly report.pdf".
+    /// Signed to a key, end to end through the real services: the decrypt outcome
+    /// carries the stanza, and FileVerifier attributes it from the written file.
     @Test(arguments: [false, true])
-    func signedFileDecryptsToItsPayloadAndVerifies(armor: Bool) async throws {
+    func signedToKeyDecryptsAndVerifies(armor: Bool) async throws {
         let (signer, _, signerPub) = makeEd25519Identity(name: "Signer")
         let x = X25519Identity.generate()
         let recipient = try X25519Recipient(publicKey: x.publicKey)
@@ -353,26 +337,65 @@ struct AgePonyTests {
         )
         defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
 
-        // Launder the filename: whatever comes back now had to come from inside.
-        let opaque = dir.appendingPathComponent("opaque.age")
-        try FileManager.default.copyItem(at: out.encryptedURL, to: opaque)
-
         let outcome = try FileEncryptor.decrypt(
-            inputURL: opaque, identities: [x], passphrase: nil
+            inputURL: out.encryptedURL, identities: [x], passphrase: nil
         )
         defer { FileEncryptor.cleanupTempFile(at: outcome.url) }
 
         #expect(outcome.isSigned)
+        #expect(outcome.signedBundle == nil)
         #expect(outcome.url.lastPathComponent == "quarterly report.pdf")
-        let recovered = try Data(contentsOf: outcome.url)
-        #expect(recovered == plaintext)
+        #expect(try Data(contentsOf: outcome.url) == plaintext)
 
-        // Attributed against the vault, from the streamed digests alone.
-        let bundle = try #require(outcome.signedBundle)
-        #expect(bundle.payloadSize == Int64(plaintext.count))
-        let verdict = FileVerifier.verify(bundle: bundle, identities: [signer], recipients: [])
+        let verdict = try #require(FileVerifier.verify(
+            stanza: outcome.signatureStanza, plaintextURL: outcome.url, identities: [signer], recipients: []
+        ))
         #expect(verdict.trust == .trusted(signerName: "Signer", isOwnIdentity: true))
         #expect(verdict.signerPublicKeyWire == SSHSig.ed25519PublicKeyWire(signerPub))
+        #expect(verdict.note == nil)
+    }
+
+    /// Signed with a passphrase: a v2 bundle, whose signature also covers the name.
+    /// The encrypted file is renamed before decrypting, so the original filename can
+    /// only come from the bundle's manifest.
+    @Test func signedWithPassphraseIsBundleV2AndVerifies() async throws {
+        let (signer, _, _) = makeEd25519Identity(name: "Signer")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agepony-10c-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let original = dir.appendingPathComponent("memo.txt")
+        let plaintext = Data("signed with a passphrase".utf8)
+        try plaintext.write(to: original)
+
+        let out = try SignEncryptService.signEncrypt(
+            inputURL: original,
+            recipients: [],
+            passphrase: "correct horse battery staple",
+            armor: false,
+            signingIdentity: signer,
+            workFactor: 16
+        )
+        defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
+
+        let opaque = dir.appendingPathComponent("opaque.age")
+        try FileManager.default.copyItem(at: out.encryptedURL, to: opaque)
+
+        let outcome = try FileEncryptor.decrypt(
+            inputURL: opaque, identities: [], passphrase: "correct horse battery staple"
+        )
+        defer { FileEncryptor.cleanupTempFile(at: outcome.url) }
+
+        let bundle = try #require(outcome.signedBundle)
+        #expect(bundle.version == 2)
+        #expect(bundle.nameCovered)
+        #expect(outcome.url.lastPathComponent == "memo.txt")
+        #expect(try Data(contentsOf: outcome.url) == plaintext)
+        let verdict = FileVerifier.verify(bundle: bundle, identities: [signer], recipients: [])
+        #expect(verdict.trust == .trusted(signerName: "Signer", isOwnIdentity: true))
+        #expect(verdict.note == nil)
     }
 
     /// An unsigned file is unaffected: no wrapper, no verdict, name derived from
@@ -408,11 +431,9 @@ struct AgePonyTests {
     }
 
     /// Re-encrypting must not strip a signature, so the migrate path decrypts with
-    /// the bundle left whole.
+    /// a bundle (passphrase files) left whole.
     @Test func decryptCanLeaveTheBundleWrapped() async throws {
         let (signer, _, _) = makeEd25519Identity(name: "Signer")
-        let x = X25519Identity.generate()
-        let recipient = try X25519Recipient(publicKey: x.publicKey)
 
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("agepony-10c-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -425,17 +446,18 @@ struct AgePonyTests {
 
         let out = try SignEncryptService.signEncrypt(
             inputURL: original,
-            recipients: [recipient],
-            passphrase: nil,
+            recipients: [],
+            passphrase: "keep it whole please",
             armor: false,
-            signingIdentity: signer
+            signingIdentity: signer,
+            workFactor: 16
         )
         defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
 
         let outcome = try FileEncryptor.decrypt(
             inputURL: out.encryptedURL,
-            identities: [x],
-            passphrase: nil,
+            identities: [],
+            passphrase: "keep it whole please",
             unwrapSignedBundle: false
         )
         defer { FileEncryptor.cleanupTempFile(at: outcome.url) }
@@ -448,5 +470,39 @@ struct AgePonyTests {
         let bundle = try #require(SignedBundle.parse(onDisk))
         #expect(bundle.name == "memo.txt")
         #expect(bundle.payload == plaintext)
+    }
+
+    /// A key-signed file can't be migrated to new recipients: its v2 signature
+    /// covers the old ones, and dropping it quietly would lose provenance.
+    @Test func migrateRefusesASignatureStanzaFile() async throws {
+        let (signer, _, _) = makeEd25519Identity(name: "Signer")
+        let x = X25519Identity.generate()
+        let other = X25519Identity.generate()
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agepony-mig-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let original = dir.appendingPathComponent("a.txt")
+        try Data("signed".utf8).write(to: original)
+
+        let out = try SignEncryptService.signEncrypt(
+            inputURL: original,
+            recipients: [try X25519Recipient(publicKey: x.publicKey)],
+            passphrase: nil,
+            armor: false,
+            signingIdentity: signer
+        )
+        defer { FileEncryptor.cleanupTempFile(at: out.encryptedURL) }
+
+        #expect(throws: MigrateError.signatureWouldBeLost) {
+            _ = try MigrateService.migrate(
+                inputURL: out.encryptedURL,
+                identities: [x],
+                passphrase: nil,
+                to: [try X25519Recipient(publicKey: other.publicKey)],
+                armor: false
+            )
+        }
     }
 }

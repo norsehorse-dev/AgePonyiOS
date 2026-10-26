@@ -51,6 +51,11 @@
                BlueprintName = "AgePonyUITests"
                ReferencedContainer = "container:AgePony.xcodeproj">
             </BuildableReference>
+            <SkippedTests>
+               <Test
+                  Identifier = "SnapshotTests">
+               </Test>
+            </SkippedTests>
          </TestableReference>
       </Testables>
    </TestAction>

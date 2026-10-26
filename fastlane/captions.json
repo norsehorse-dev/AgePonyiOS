@@ -1,0 +1,22 @@
+{
+  "01Files": {
+    "headline": "Encrypt anything, to anyone",
+    "subline": "Files, text and notes, as standard age"
+  },
+  "02Identities": {
+    "headline": "Quantum-safe keys on your phone",
+    "subline": "Post-quantum, SSH and hardware keys"
+  },
+  "03ReceiveKeys": {
+    "headline": "Move your keys to a new phone",
+    "subline": "Scan, check the codes match, done"
+  },
+  "04PaperBackup": {
+    "headline": "Back up a key on paper",
+    "subline": "Passphrase-protected, restorable with age"
+  },
+  "05Notes": {
+    "headline": "Notes only you can open",
+    "subline": "Each one locked with its own passphrase"
+  }
+}

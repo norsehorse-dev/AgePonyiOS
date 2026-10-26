@@ -293,7 +293,7 @@ struct AddRecipientView: View {
         githubError = nil
         githubLoading = true
         do {
-            let found = try await RecipientImportService.fetchFromGitHub(username: username)
+            let found = try await RecipientImportService.fetchFromGitHub(username: username, proxy: vault.proxyConfig)
             for c in found {
                 appendCandidate(c, source: .github, sourceMetadata: "github.com/\(username)")
             }
@@ -308,8 +308,13 @@ struct AddRecipientView: View {
         source: StoredRecipientSource,
         sourceMetadata: String?
     ) {
+        // Do not pre-fill the name field with the key: age and QR pastes derive
+        // the default name from the key itself, which is not a real name. Start
+        // empty so the user names it; saveAll still falls back to the default
+        // when the field is left blank.
+        let prefillsFromKey = (source == .pasteAge || source == .qrScan)
         candidates.append(EditableCandidate(
-            name: candidate.defaultName,
+            name: prefillsFromKey ? "" : candidate.defaultName,
             include: true,
             candidate: candidate,
             source: source,
@@ -353,12 +358,7 @@ struct AddRecipientView: View {
     }
 
     private func typeLabel(_ t: StoredRecipientType) -> String {
-        switch t {
-        case .x25519:    return "age X25519"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA:    return "SSH RSA"
-        case .postQuantum: return "Post-quantum hybrid"
-        }
+        t.sectionTitle
     }
 
     private func describePasteError(_ error: Error) -> String {

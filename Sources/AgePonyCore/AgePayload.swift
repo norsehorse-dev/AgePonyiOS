@@ -34,6 +34,9 @@ public enum AgePayloadError: Error, Equatable {
     case unexpectedExtraBytes
     case streamReadFailed
     case streamWriteFailed
+    /// An empty final chunk after a full one. age never writes it (a payload that ends on
+    /// a chunk boundary flags the full chunk as last), so it's a non-canonical file.
+    case emptyFinalChunk
 }
 
 public enum AgePayload {
@@ -120,6 +123,9 @@ public enum AgePayload {
         }
         if lastChunkSize < tagSize {
             throw AgePayloadError.truncatedChunk
+        }
+        if numChunks > 1 && lastChunkSize == tagSize {
+            throw AgePayloadError.emptyFinalChunk
         }
 
         var plaintext = Data()
@@ -263,7 +269,9 @@ public enum AgePayload {
                     current = next
                 }
             } else {
-                // A short block can only be the final chunk.
+                // A short block can only be the final chunk, and only the first chunk may
+                // be empty.
+                if counter > 0 && current.count == tagSize { throw AgePayloadError.emptyFinalChunk }
                 try openChunk(current, key: payloadKey, counter: counter, last: true, into: sink)
                 break
             }

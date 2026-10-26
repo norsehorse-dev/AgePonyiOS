@@ -23,6 +23,8 @@ public enum CBORError: Error, Equatable {
     case unsupportedAdditionalInfo(UInt8)
     case invalidUTF8
     case trailingBytes
+    /// Nesting deeper than `CBORReader.maxDepth` (audit L-11).
+    case tooDeep
 }
 
 /// A CBOR value, limited to the CTAP2 subset.
@@ -195,8 +197,20 @@ public struct CBORReader {
         return data[offset]
     }
 
+    /// Deepest nesting accepted (audit L-11). CTAP2 replies nest three or four deep.
+    public static let maxDepth = 16
+
+    /// A length or count from the input, checked against what's left before it becomes an
+    /// `Int`: a declared size can't trap the conversion or reserve memory the input
+    /// doesn't back (audit L-11). Every item takes at least one byte, so a count bounds
+    /// the same way.
+    private func boundedLength(_ v: UInt64) throws -> Int {
+        guard v <= UInt64(data.endIndex - offset) else { throw CBORError.truncated }
+        return Int(v)
+    }
+
     private mutating func readBytes(_ count: Int) throws -> Data {
-        guard count >= 0, offset + count <= data.endIndex else { throw CBORError.truncated }
+        guard count >= 0, count <= data.endIndex - offset else { throw CBORError.truncated }
         let slice = data[offset ..< offset + count]
         offset += count
         return Data(slice)
@@ -224,6 +238,10 @@ public struct CBORReader {
     }
 
     public mutating func decode() throws -> CBOR {
+        try decode(depth: 0)
+    }
+
+    private mutating func decode(depth: Int) throws -> CBOR {
         let initial = try readByte()
         let major = initial >> 5
         let info = initial & 0x1F
@@ -234,26 +252,26 @@ public struct CBORReader {
         case 1:
             return .negative(try readArgument(info))
         case 2:
-            let len = Int(try readArgument(info))
+            let len = try boundedLength(try readArgument(info))
             return .bytes(try readBytes(len))
         case 3:
-            let len = Int(try readArgument(info))
+            let len = try boundedLength(try readArgument(info))
             let raw = try readBytes(len)
             guard let s = String(data: raw, encoding: .utf8) else { throw CBORError.invalidUTF8 }
             return .text(s)
         case 4:
-            let count = Int(try readArgument(info))
+            guard depth < Self.maxDepth else { throw CBORError.tooDeep }
+            let count = try boundedLength(try readArgument(info))
             var items: [CBOR] = []
-            items.reserveCapacity(count)
-            for _ in 0 ..< count { items.append(try decode()) }
+            for _ in 0 ..< count { items.append(try decode(depth: depth + 1)) }
             return .array(items)
         case 5:
-            let count = Int(try readArgument(info))
+            guard depth < Self.maxDepth else { throw CBORError.tooDeep }
+            let count = try boundedLength(try readArgument(info))
             var pairs: [(CBOR, CBOR)] = []
-            pairs.reserveCapacity(count)
             for _ in 0 ..< count {
-                let k = try decode()
-                let v = try decode()
+                let k = try decode(depth: depth + 1)
+                let v = try decode(depth: depth + 1)
                 pairs.append((k, v))
             }
             return .map(pairs)

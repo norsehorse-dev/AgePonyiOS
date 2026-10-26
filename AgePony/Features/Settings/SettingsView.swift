@@ -3,9 +3,9 @@
 //  AgePony
 //
 //  Settings tab. Surfaces:
-//    • Biometric on/off (cosmetic — the master key Keychain ACL gates
-//      Vault access regardless; this toggle drives whether AgePony shows
-//      its OWN auth prompts for in-app reveals on top of the system one).
+//    • In-app biometric prompts on/off. This only drives whether AgePony
+//      shows its OWN auth prompts for in-app reveals; how the vault locks is
+//      LockSettingsView's job, and this toggle never changes it (L-25).
 //    • Encrypt-to-self default — auto-add the active identity's recipient
 //      when encrypting from the Files / Notes / Text tabs.
 //    • Active identity — which identity is the default "encrypt-to-self"
@@ -26,10 +26,16 @@ struct SettingsView: View {
     @State private var encryptToSelfDefault: Bool
     @State private var scryptWorkFactor: Int
     @State private var activeIdentityID: UUID?
+    @State private var backupRecipientID: UUID?
 
     @State private var pendingReset: Bool = false
     @State private var resetError: String?
     @State private var showWalkthrough: Bool = false
+    @AppStorage(AppTheme.storageKey) private var themeRaw: String = AppTheme.system.rawValue
+    @AppStorage(ClipboardPreferences.enabledKey) private var clipboardAutoClear: Bool = true
+    @AppStorage(ClipboardPreferences.intervalKey) private var clipboardInterval: Double = 60
+    @State private var showTempCleared: Bool = false
+    @State private var tempFreedBytes: Int64 = 0
 
     init(vault: Vault) {
         self.vault = vault
@@ -37,6 +43,7 @@ struct SettingsView: View {
         _encryptToSelfDefault   = State(initialValue: vault.encryptToSelfDefault)
         _scryptWorkFactor       = State(initialValue: vault.scryptWorkFactor)
         _activeIdentityID       = State(initialValue: vault.activeIdentityID)
+        _backupRecipientID      = State(initialValue: vault.backupRecipientSelection.first)
     }
 
     var body: some View {
@@ -44,9 +51,14 @@ struct SettingsView: View {
             biometricSection
             encryptionSection
             identitySection
+            portabilitySection
             signingSection
+            appearanceSection
+            clipboardSection
             helpSection
+            moreFromNorseHorseSection
             aboutSection
+            dataSection
             dangerZoneSection
         }
         .fullScreenCover(isPresented: $showWalkthrough) {
@@ -77,6 +89,16 @@ struct SettingsView: View {
 
     private var biometricSection: some View {
         Section {
+            NavigationLink {
+                LockSettingsView(vault: vault)
+            } label: {
+                Label("Lock & password", systemImage: "lock.shield")
+            }
+            NavigationLink {
+                NetworkSettingsView(vault: vault)
+            } label: {
+                Label("Network", systemImage: "network")
+            }
             if BiometricGate.availableBiometric() == .none {
                 Text("This device doesn't support biometric authentication. AgePony will use your device passcode.")
                     .font(AgePonyTypography.footnote)
@@ -84,19 +106,42 @@ struct SettingsView: View {
             } else {
                 Toggle("In-app biometric prompts", isOn: $biometricEnabled)
                     .onChange(of: biometricEnabled) { _, new in
-                        vault.biometricEnabled = new
+                        guard !new, vault.biometricEnabled else {
+                            vault.biometricEnabled = new
+                            return
+                        }
+                        // Turning prompts off weakens the app: confirm it's the owner (L-15).
+                        Task {
+                            do {
+                                try await BiometricGate.authenticate(reason: "Confirm it's you to turn off in-app prompts")
+                                vault.biometricEnabled = false
+                            } catch BiometricGateError.unavailable {
+                                vault.biometricEnabled = false
+                            } catch {
+                                biometricEnabled = true
+                            }
+                        }
                     }
             }
         } header: {
             Text("Security")
         } footer: {
-            Text("When on, AgePony prompts for \(biometricLabel) before revealing private keys or decrypting sensitive notes. The vault itself is always biometrically protected at the OS level.")
+            Text("When on, AgePony prompts for \(biometricLabel) before revealing private keys or decrypting sensitive notes. How the vault itself locks is set under Lock & password.")
         }
     }
 
     private var encryptionSection: some View {
         Section {
             Toggle("Encrypt to self by default", isOn: $encryptToSelfDefault)
+
+            Picker("Also encrypt to", selection: $backupRecipientID) {
+                Text("No one").tag(UUID?.none)
+                ForEach(vault.recipients) { r in
+                    Text(r.name).tag(Optional(r.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: backupRecipientID) { _, new in vault.backupRecipientID = new }
 
             Picker("Passphrase strength", selection: $scryptWorkFactor) {
                 ForEach(
@@ -118,7 +163,7 @@ struct SettingsView: View {
         } header: {
             Text("Encryption")
         } footer: {
-            Text("When on, AgePony automatically adds your active identity as a recipient on every file you encrypt — so you can still decrypt it yourself later.")
+            Text("When on, AgePony automatically adds your active identity as a recipient on every file you encrypt, so you can still decrypt it yourself later. \"Also encrypt to\" ticks a saved recipient by default too: pick a key you have backed up, so a file you encrypt to this iPhone's hardware key can still be opened if the phone is lost.")
         }
     }
 
@@ -139,10 +184,40 @@ struct SettingsView: View {
                     vault.activeIdentityID = new
                 }
             }
+            NavigationLink {
+                RecentlyDeletedView(vault: vault)
+            } label: {
+                Label("Recently deleted", systemImage: "trash")
+            }
         } header: {
             Text("Identity")
         } footer: {
             Text("The active identity is the default \"encrypt-to-self\" recipient and the first identity tried when decrypting.")
+        }
+    }
+
+    /// Keys on other devices and on paper (5.0.1).
+    private var portabilitySection: some View {
+        Section {
+            NavigationLink {
+                SendKeysView(vault: vault)
+            } label: {
+                Label("Send keys to another device", systemImage: "square.and.arrow.up.on.square")
+            }
+            NavigationLink {
+                ReceiveKeysView(vault: vault)
+            } label: {
+                Label("Receive keys from another device", systemImage: "square.and.arrow.down.on.square")
+            }
+            NavigationLink {
+                PaperRestoreView(vault: vault)
+            } label: {
+                Label("Restore from a paper backup", systemImage: "doc.viewfinder")
+            }
+        } header: {
+            Text("Move and back up keys")
+        } footer: {
+            Text("To make a paper backup, open an identity on the Identities tab. Hardware keys stay on this device and can't be moved or backed up.")
         }
     }
 
@@ -169,6 +244,12 @@ struct SettingsView: View {
 
     private var helpSection: some View {
         Section {
+            NavigationLink { HelpView() } label: {
+                Label("Help", systemImage: "questionmark.circle")
+            }
+            NavigationLink { SecurityInfoView() } label: {
+                Label("Security", systemImage: "lock.shield")
+            }
             Button {
                 showWalkthrough = true
             } label: {
@@ -237,21 +318,8 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Link(destination: URL(string: "https://github.com/norsehorse-dev/AgePonyiOS")!) {
-                HStack {
-                    Text("Source code")
-                    Spacer()
-                    Image(systemName: "arrow.up.right.square")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Link(destination: URL(string: "https://apps.apple.com/us/app/pgpony/id6759994432")!) {
-                HStack {
-                    Text("PGPony")
-                    Spacer()
-                    Image(systemName: "arrow.up.right.square")
-                        .foregroundStyle(.secondary)
-                }
+            NavigationLink { LicensesView() } label: {
+                Text("Licenses")
             }
             HStack {
                 Text("Made by")
@@ -274,6 +342,117 @@ struct SettingsView: View {
             Text("Danger zone")
         } footer: {
             Text("Erases all stored identities, recipients, and notes. Files outside AgePony are untouched.")
+        }
+    }
+
+    // MARK: - Appearance
+
+    private var appearanceSection: some View {
+        Section {
+            Picker(selection: Binding(
+                get: { AppTheme(rawValue: themeRaw) ?? .system },
+                set: { themeRaw = $0.rawValue }
+            )) {
+                ForEach(AppTheme.allCases) { theme in
+                    Text(theme.displayName).tag(theme)
+                }
+            } label: {
+                Label("Theme", systemImage: "paintbrush")
+            }
+        } header: {
+            Text("Appearance")
+        }
+    }
+
+    // MARK: - Clipboard
+
+    private var clipboardSection: some View {
+        Section {
+            Toggle("Auto-clear clipboard", isOn: $clipboardAutoClear)
+            if clipboardAutoClear {
+                Picker(selection: $clipboardInterval) {
+                    Text("30 seconds").tag(30.0)
+                    Text("1 minute").tag(60.0)
+                    Text("2 minutes").tag(120.0)
+                    Text("5 minutes").tag(300.0)
+                } label: {
+                    Label("Clear after", systemImage: "clock")
+                }
+            }
+        } header: {
+            Text("Clipboard")
+        } footer: {
+            Text("Copied keys and text are erased from the clipboard after the chosen time. Turn this off to keep copies until you replace them.")
+        }
+    }
+
+    // MARK: - Data
+
+    private var dataSection: some View {
+        Section {
+            Button {
+                tempFreedBytes = TempFileCleanup.sweepAll()
+                showTempCleared = true
+            } label: {
+                Label("Clear temporary files", systemImage: "internaldrive")
+            }
+        } header: {
+            Text("Data")
+        } footer: {
+            Text("Removes leftover files from encrypting or decrypting large files. Your identities, recipients, and notes are untouched.")
+        }
+        .alert("Temporary files cleared", isPresented: $showTempCleared) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(tempFreedBytes > 0
+                 ? "Freed \(ByteCountFormatter.string(fromByteCount: tempFreedBytes, countStyle: .file))."
+                 : "There was nothing to clear.")
+        }
+    }
+
+    // MARK: - More from NorseHorse
+
+    private var moreFromNorseHorseSection: some View {
+        Section {
+            appLink("PGPony", "OpenPGP encryption and signing", "envelope.fill", .indigo,
+                    "https://apps.apple.com/us/app/pgpony/id6759994432")
+            appLink("QuorumPony", "Quorum key backup and recovery", "person.3.fill", .teal,
+                    "https://apps.apple.com/us/app/quorumpony-key-backup/id6783608628")
+            appLink("CarrierPony", "PGP chat and encrypted files", "bubble.left.and.bubble.right.fill", .green,
+                    "https://apps.apple.com/us/app/carrierpony-pgp-chat-files/id6786930072")
+            appLink("BurnPony", "Self-destructing encrypted messages", "flame.fill", .orange,
+                    "https://apps.apple.com/us/app/burnpony/id6788513233")
+            appLink("RelayPony", "Encrypted file transfer", "paperplane.fill", .blue,
+                    "https://apps.apple.com/us/app/relaypony-file-transfer/id6785085525")
+            appLink("ScrubPony", "Strip metadata from your files", "eraser.fill", .pink,
+                    "https://scrubpony.app")
+            appLink("VaultPony", "Encrypted vault for your files", "lock.rectangle.stack.fill", .brown,
+                    "https://vaultpony.app")
+            appLink("PassPony", "Password manager", "key.fill", .yellow,
+                    "https://passpony.app")
+            appLink("See the full pony family", "Every NorseHorse app in one place", "square.grid.2x2.fill", .indigo,
+                    "https://pony.norsehor.se")
+            appLink("Source code on GitHub", "AgePony is fully open source (Apache-2.0). Inspect all of it.",
+                    "chevron.left.forwardslash.chevron.right", .primary,
+                    "https://github.com/norsehorse-dev/AgePonyiOS")
+        } header: {
+            Text("More from NorseHorse")
+        } footer: {
+            Text("Other apps from the same developer.")
+        }
+    }
+
+    private func appLink(_ name: String, _ subtitle: String, _ systemImage: String,
+                         _ color: Color, _ urlString: String) -> some View {
+        Link(destination: URL(string: urlString)!) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).foregroundStyle(.primary)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: systemImage).foregroundStyle(color)
+            }
         }
     }
 

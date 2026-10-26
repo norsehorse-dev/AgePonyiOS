@@ -90,11 +90,16 @@ public struct ScryptIdentity: AgeIdentity {
         }
         guard saltData.count == 16 else { return nil }
 
-        guard let workFactor = Int(stanza.args[1]),
-              workFactor > 0,
-              workFactor <= maxWorkFactor else {
-            throw ScryptStanzaError.invalidWorkFactor
-        }
+        // Work factor: decimal digits only, no sign, no leading zero, as Go age reads
+        // it. A malformed one is "not for me"; a well-formed one above the cap throws so
+        // the app can say the file needs more than this device allows.
+        let wf = stanza.args[1]
+        guard !wf.isEmpty, wf.count <= 2, wf.allSatisfy({ ("0"..."9").contains($0) }),
+              !(wf.count > 1 && wf.hasPrefix("0")),
+              let workFactor = Int(wf), workFactor > 0 else { return nil }
+        guard workFactor <= maxWorkFactor else { throw ScryptStanzaError.invalidWorkFactor }
+        // Checked before the KDF so a malformed stanza costs nothing (audit L-5).
+        guard stanza.body.count == 32 else { return nil }
 
         let wrapKeyBytes = try Scrypt.ageWrapKey(
             passphrase: passphrase,
@@ -102,8 +107,6 @@ public struct ScryptIdentity: AgeIdentity {
             workFactor: workFactor
         )
         let wrapKey = SymmetricKey(data: Data(wrapKeyBytes))
-
-        guard stanza.body.count == 32 else { return nil }
         let ciphertext = stanza.body.prefix(16)
         let tag = stanza.body.suffix(16)
         let zeroNonce = try ChaChaPoly.Nonce(data: Data(repeating: 0, count: 12))

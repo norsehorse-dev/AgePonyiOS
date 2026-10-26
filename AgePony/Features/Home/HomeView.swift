@@ -2,23 +2,22 @@
 //  HomeView.swift
 //  AgePony
 //
-//  The 5-tab shell. As of 1g, also handles share-extension hand-offs:
-//  when the .agePonyShareIncoming notification fires, this view presents
-//  the matching flow as a sheet over the current tab, with the payload
-//  preloaded. The four cases are:
+//  The 5-tab shell. Also presents share-extension hand-offs: RootView claims
+//  an incoming payload (5.0.1) and hands it down; this view presents the
+//  matching flow as a sheet over the current tab, with the input preloaded.
+//  The four cases are:
 //
 //      direction=encrypt + kind=file  → EncryptFlow(preloadedURL:)
 //      direction=decrypt + kind=file  → DecryptFlow(preloadedURL:)
 //      direction=encrypt + kind=text  → TextEncryptView(preloadedText:)
 //      direction=decrypt + kind=text  → TextDecryptView(preloadedText:)
 //
-//  On sheet dismiss, the App Group token directory is cleaned up so
-//  abandoned payloads don't accumulate. A `.task`-driven sweep also
-//  collects any payloads older than 1 hour at view appear.
+//  On sheet dismiss the claimed file is deleted (M-7).
 //
 
 import SwiftUI
 import Combine
+import StoreKit
 
 struct HomeView: View {
 
@@ -34,7 +33,9 @@ struct HomeView: View {
     /// they had been.
     @Binding var selectedTab: Tab
     @State private var pendingFileURL: URL?
-    @State private var sharePayload: SharedPayload?
+    /// A claimed share waiting to be shown. Owned by RootView, which receives
+    /// it even while the vault is locked.
+    @Binding var pendingShare: ClaimedShare?
     @State private var showWalkthrough: Bool = false
 
     enum Tab: String, Hashable {
@@ -45,35 +46,37 @@ struct HomeView: View {
         TabView(selection: $selectedTab) {
             NavigationStack {
                 FilesView(vault: vault, pendingExternalDecryptURL: $pendingFileURL)
-                    .navigationTitle("Files")
+                    .toolbar(.hidden, for: .navigationBar)
             }
             .tabItem { Label("Files", systemImage: "doc.badge.gearshape") }
             .tag(Tab.files)
 
             NavigationStack {
                 NotesView(vault: vault)
-                    .navigationTitle("Notes")
+                    .navigationTitle("")
+                    .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem { Label("Notes", systemImage: "note.text") }
             .tag(Tab.notes)
 
             NavigationStack {
                 TextModeView(vault: vault)
-                    .navigationTitle("Text")
+                    .toolbar(.hidden, for: .navigationBar)
             }
             .tabItem { Label("Text", systemImage: "textformat.alt") }
             .tag(Tab.text)
 
             NavigationStack {
                 IdentitiesView(vault: vault)
-                    .navigationTitle("Identities")
+                    .navigationTitle("")
+                    .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem { Label("Identities", systemImage: "key") }
             .tag(Tab.identities)
 
             NavigationStack {
                 SettingsView(vault: vault)
-                    .navigationTitle("Settings")
+                    .toolbar(.hidden, for: .navigationBar)
             }
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(Tab.settings)
@@ -85,25 +88,16 @@ struct HomeView: View {
                 pendingFileURL = url
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .agePonyShareIncoming)) { note in
-            if let payload = note.userInfo?["payload"] as? SharedPayload {
-                sharePayload = payload
-            }
-        }
-        .sheet(item: $sharePayload, onDismiss: {
-            if let token = sharePayload?.token {
-                SharedContainer.cleanup(token: token)
-            }
-        }) { payload in
+        .sheet(item: $presentedShare, onDismiss: {
+            presentedShare?.discard()
+            presentedShare = nil
+        }) { share in
             NavigationStack {
-                ShareIncomingSheet(vault: vault, payload: payload)
+                ShareIncomingSheet(vault: vault, share: share)
             }
         }
-        .task {
-            // Clean up abandoned share payloads from previous launches that
-            // never made it through the flow.
-            SharedContainer.sweepStale()
-        }
+        .onChange(of: pendingShare) { _, new in takePendingShare(new) }
+        .onAppear { takePendingShare(pendingShare) }
         .onReceive(NotificationCenter.default.publisher(for: .agePonyOperationSucceeded)) { _ in
             // A successful encrypt just finished and the user dismissed the
             // flow. Ask StoreKit for a review if our own gating agrees it's a
@@ -126,12 +120,22 @@ struct HomeView: View {
             }
         }
     }
-}
 
-// MARK: - Make SharedPayload usable with .sheet(item:)
+    @State private var presentedShare: ClaimedShare?
 
-extension SharedPayload: Identifiable {
-    public var id: String { token }
+    /// Move a pending share into the sheet. A share that arrives while another
+    /// is on screen replaces it; the one it replaces is deleted.
+    private func takePendingShare(_ share: ClaimedShare?) {
+        guard let share else { return }
+        // A file the wipe or a sweep already removed is dropped quietly.
+        if let url = share.fileURL, !FileManager.default.fileExists(atPath: url.path) {
+            pendingShare = nil
+            return
+        }
+        if let current = presentedShare, current.id != share.id { current.discard() }
+        presentedShare = share
+        pendingShare = nil
+    }
 }
 
 // MARK: - Notification names
@@ -151,26 +155,26 @@ extension Notification.Name {
 /// tab routing.
 private struct ShareIncomingSheet: View {
     let vault: Vault
-    let payload: SharedPayload
+    let share: ClaimedShare
 
     var body: some View {
-        switch (payload.direction, payload.kind) {
+        switch (share.direction, share.kind) {
         case (.encrypt, .file):
-            if let url = try? SharedContainer.fileURL(for: payload) {
+            if let url = share.fileURL {
                 EncryptFlow(vault: vault, preloadedURL: url)
             } else {
                 missingPayload
             }
         case (.decrypt, .file):
-            if let url = try? SharedContainer.fileURL(for: payload) {
+            if let url = share.fileURL {
                 DecryptFlow(vault: vault, preloadedURL: url)
             } else {
                 missingPayload
             }
         case (.encrypt, .text):
-            TextEncryptView(vault: vault, preloadedText: payload.textPayload ?? "")
+            TextEncryptView(vault: vault, preloadedText: share.text ?? "")
         case (.decrypt, .text):
-            TextDecryptView(vault: vault, preloadedText: payload.textPayload ?? "")
+            TextDecryptView(vault: vault, preloadedText: share.text ?? "")
         }
     }
 

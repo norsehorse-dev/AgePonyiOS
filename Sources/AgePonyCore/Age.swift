@@ -46,6 +46,10 @@ public enum AgeError: Error, Equatable {
     case truncatedFile
     case headerError(AgeHeaderError)
     case payloadError(AgePayloadError)
+    /// A passphrase was tried on a header where scrypt isn't the only stanza (audit L-2).
+    case scryptNotAlone
+    /// An identity unwrapped something that isn't a 16-byte file key (audit L-5).
+    case invalidFileKeyLength(Int)
 }
 
 // MARK: - Top-level API
@@ -90,9 +94,21 @@ public enum Age {
         return try encrypt(plaintext: plaintext, to: [recipient])
     }
 
+    /// Plaintext plus the file's AgePony signature stanza, read three ways (absent,
+    /// unreadable, opened). Plain age ignores the stanza, and so does `decrypt`.
+    public struct DecryptedWithSignature {
+        public let plaintext: Data
+        public let signature: SignatureStanza.Opening
+    }
+
     /// Decrypt `ciphertext` using one or more identities. Each identity is
     /// tried against each stanza until one yields a valid file key.
     public static func decrypt(ciphertext: Data, identities: [AgeIdentity]) throws -> Data {
+        try decryptAndRecoverSignature(ciphertext: ciphertext, identities: identities).plaintext
+    }
+
+    /// Like `decrypt`, but also reads the `agepony.com/sig` stanza if there is one.
+    public static func decryptAndRecoverSignature(ciphertext: Data, identities: [AgeIdentity]) throws -> DecryptedWithSignature {
         let (header, payloadOffset): (AgeHeader, Int)
         do {
             (header, payloadOffset) = try AgeHeader.parse(bytes: ciphertext)
@@ -102,17 +118,8 @@ public enum Age {
 
         guard payloadOffset <= ciphertext.count else { throw AgeError.truncatedFile }
 
-        // Try every identity against every stanza until one returns a fileKey.
-        var fileKey: Data?
-        outer: for id in identities {
-            for stanza in header.stanzas {
-                if let key = try id.unwrap(stanza: stanza), key.count == fileKeySize {
-                    fileKey = key
-                    break outer
-                }
-            }
-        }
-        guard let fileKey else { throw AgeError.noMatchingIdentity }
+        // Software identities first, hardware last (see unwrapFileKey).
+        let fileKey = try unwrapFileKey(stanzas: header.stanzas, identities: identities)
 
         // Verify header MAC. If this fails the file has been tampered with.
         do {
@@ -123,11 +130,16 @@ public enum Age {
 
         // Decrypt payload.
         let payloadBytes = ciphertext.suffix(from: ciphertext.startIndex + payloadOffset)
+        let plaintext: Data
         do {
-            return try AgePayload.decrypt(bytes: Data(payloadBytes), fileKey: fileKey)
+            plaintext = try AgePayload.decrypt(bytes: Data(payloadBytes), fileKey: fileKey)
         } catch let e as AgePayloadError {
             throw AgeError.payloadError(e)
         }
+        return DecryptedWithSignature(
+            plaintext: plaintext,
+            signature: SignatureStanza.openHeader(fileKey: fileKey, stanzas: header.stanzas)
+        )
     }
 
     /// Convenience: decrypt with a passphrase.
@@ -147,6 +159,72 @@ public enum Age {
             }
             throw AgeError.noMatchingIdentity
         }
+    }
+
+    /// Find the file key. Software identities go first across every stanza, so a file
+    /// that also has a software recipient never waits on (or fails because of) a hardware
+    /// key. Hardware identities go last, and an error from one (a cancelled prompt, a key
+    /// the OS invalidated) is held back while the rest are tried; it only surfaces if
+    /// nothing else opened the file. Mirrors Android `Age.unwrapFileKey`.
+    static func unwrapFileKey(stanzas: [Stanza], identities: [AgeIdentity]) throws -> Data {
+        try requireScryptAlone(stanzas: stanzas, identities: identities)
+        let hardware = identities.filter { $0 is HardwareIdentity }
+        let software = identities.filter { !($0 is HardwareIdentity) }
+        for stanza in stanzas {
+            for id in software {
+                if let key = try id.unwrap(stanza: stanza) { return try checkFileKey(key) }
+            }
+        }
+        var firstError: Error?
+        for stanza in stanzas {
+            for id in hardware {
+                let key: Data?
+                do {
+                    key = try id.unwrap(stanza: stanza)
+                } catch {
+                    if firstError == nil { firstError = error }
+                    continue
+                }
+                if let key { return try checkFileKey(key) }
+            }
+        }
+        throw firstError ?? AgeError.noMatchingIdentity
+    }
+
+    /// Go age: "an scrypt recipient must be the only one". Checked before any identity
+    /// runs, so a header that pairs a cheap stanza with a second scrypt stanza at a huge
+    /// work factor never reaches the KDF (audit L-2). As in Go, where the check lives in
+    /// the scrypt identity, it applies only when a passphrase is being tried: opening a
+    /// mixed file with an X25519 key does no KDF work and Go age allows it.
+    static func requireScryptAlone(stanzas: [Stanza], identities: [AgeIdentity]) throws {
+        if stanzas.count > 1, stanzas.contains(where: { $0.type == "scrypt" }),
+           identities.contains(where: { $0 is ScryptIdentity }) {
+            throw AgeError.scryptNotAlone
+        }
+    }
+
+    /// A recovered file key must be exactly 16 bytes (audit L-5). The per-type body checks
+    /// catch this earlier for built-in recipients; this backstop covers ssh-rsa and any
+    /// hardware identity.
+    static func checkFileKey(_ key: Data) throws -> Data {
+        guard key.count == fileKeySize else { throw AgeError.invalidFileKeyLength(key.count) }
+        return key
+    }
+
+    /// True if any identity opens any stanza. A hardware identity answers from its key
+    /// tag, so probing a file never makes the hardware (or its prompt) do anything.
+    public static func anyOpens(stanzas: [Stanza], identities: [AgeIdentity]) throws -> Bool {
+        try requireScryptAlone(stanzas: stanzas, identities: identities)
+        for stanza in stanzas {
+            for id in identities {
+                if let hw = id as? HardwareIdentity {
+                    if hw.matches(stanza: stanza) { return true }
+                } else if try id.unwrap(stanza: stanza) != nil {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Shared precondition check for both the buffered and streaming encrypt paths.
@@ -213,24 +291,14 @@ public enum Age {
     ) throws -> Bool {
         guard !identities.isEmpty else { return false }
         let header = try parseHeaderStream(ciphertext: source)
-        for stanza in header.stanzas {
-            for id in identities where try id.unwrap(stanza: stanza) != nil {
-                return true
-            }
-        }
-        return false
+        return try anyOpens(stanzas: header.stanzas, identities: identities)
     }
 
     /// True if any of `identities` can unwrap this buffered file's header.
     public static func canDecrypt(ciphertext: Data, identities: [AgeIdentity]) throws -> Bool {
         guard !identities.isEmpty else { return false }
         let header = try parseHeader(ciphertext: ciphertext)
-        for stanza in header.stanzas {
-            for id in identities where try id.unwrap(stanza: stanza) != nil {
-                return true
-            }
-        }
-        return false
+        return try anyOpens(stanzas: header.stanzas, identities: identities)
     }
 
     // MARK: - Streaming API (bounded memory)
@@ -276,11 +344,16 @@ public enum Age {
 
     /// Decrypt an age file read from `source` using one or more identities, writing the
     /// plaintext to `sink`. Opens both streams if needed and leaves them open.
+    ///
+    /// Returns the file's signature stanza, read three ways. The plaintext has already
+    /// been written by the time a signature can be checked, so a caller must treat an
+    /// unreadable or failing signature loudly.
+    @discardableResult
     public static func decryptStream(
         ciphertext source: InputStream,
         identities: [AgeIdentity],
         into sink: OutputStream
-    ) throws {
+    ) throws -> SignatureStanza.Opening {
         AgePayload.ensureOpen(source)
         AgePayload.ensureOpen(sink)
 
@@ -293,16 +366,7 @@ public enum Age {
             throw AgeError.payloadError(e)
         }
 
-        var fileKey: Data?
-        outer: for id in identities {
-            for stanza in header.stanzas {
-                if let key = try id.unwrap(stanza: stanza), key.count == fileKeySize {
-                    fileKey = key
-                    break outer
-                }
-            }
-        }
-        guard let fileKey else { throw AgeError.noMatchingIdentity }
+        let fileKey = try unwrapFileKey(stanzas: header.stanzas, identities: identities)
 
         do {
             try header.verifyMAC(fileKey: fileKey)
@@ -315,5 +379,6 @@ public enum Age {
         } catch let e as AgePayloadError {
             throw AgeError.payloadError(e)
         }
+        return SignatureStanza.openHeader(fileKey: fileKey, stanzas: header.stanzas)
     }
 }

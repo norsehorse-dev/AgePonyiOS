@@ -129,16 +129,25 @@ class ShareViewController: UIViewController {
         }
     }
 
-    /// Walks the responder chain looking for any UIResponder that
-    /// responds to the `openURL:` selector. Returns true if found and
-    /// invoked.
+    /// Walk the responder chain to the host UIApplication and ask it to open
+    /// `url`. iOS 18 stopped honouring the old `openURL:` selector, so the
+    /// current `openURL:options:completionHandler:` is tried first. If neither
+    /// launches AgePony, the payload stays staged and the app picks it up the
+    /// next time it comes to the front (5.0.1).
     @discardableResult
     private func performResponderChainOpenURL(_ url: URL) -> Bool {
-        let selector = sel_registerName("openURL:")
+        let modern = sel_registerName("openURL:options:completionHandler:")
+        let legacy = sel_registerName("openURL:")
         var responder: UIResponder? = self
         while let r = responder {
-            if r.responds(to: selector) {
-                _ = r.perform(selector, with: url)
+            if r.responds(to: modern) {
+                typealias OpenFn = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, Any?) -> Void
+                let fn = unsafeBitCast(r.method(for: modern), to: OpenFn.self)
+                fn(r, modern, url as NSURL, NSDictionary(), nil)
+                return true
+            }
+            if r.responds(to: legacy) {
+                _ = r.perform(legacy, with: url)
                 return true
             }
             responder = r.next
@@ -157,6 +166,9 @@ class ShareViewController: UIViewController {
         return url
     }
 
+    /// Stage the first usable attachment. A file (anything that came with a file
+    /// URL, or isn't text) is copied file to file; text from a text-only share
+    /// goes in the manifest. Direction comes from the content, not the name.
     private func extractPayload() async throws -> SharedPayload {
         guard let extensionItem = extensionContext?.inputItems.first as? NSExtensionItem,
               let attachments = extensionItem.attachments,
@@ -165,84 +177,66 @@ class ShareViewController: UIViewController {
         }
 
         for provider in attachments {
-            if provider.hasItemConformingToTypeIdentifier("org.age-encryption.age") {
-                if let url = try? await loadFileURL(from: provider, typeIdentifier: "org.age-encryption.age") {
-                    return try SharedContainer.writeFilePayload(
-                        direction: .decrypt,
-                        sourceFileURL: url,
-                        originalFilename: url.lastPathComponent
-                    )
-                }
+            let isFile = provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                || provider.hasItemConformingToTypeIdentifier("org.age-encryption.age")
+            let isText = provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)
+                || provider.hasItemConformingToTypeIdentifier(UTType.text.identifier)
+
+            if isText && !isFile, let text = try? await loadText(from: provider) {
+                return try SharedContainer.writeTextPayload(text: text)
             }
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                if let url = try? await loadFileURL(from: provider, typeIdentifier: UTType.fileURL.identifier) {
-                    let direction: SharedPayload.Direction = url.pathExtension.lowercased() == "age" ? .decrypt : .encrypt
-                    return try SharedContainer.writeFilePayload(
-                        direction: direction,
-                        sourceFileURL: url,
-                        originalFilename: url.lastPathComponent
-                    )
-                }
-            }
-            if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-                if let text = try? await loadText(from: provider) {
-                    let direction: SharedPayload.Direction =
-                        text.contains("-----BEGIN AGE ENCRYPTED FILE-----") ? .decrypt : .encrypt
-                    return try SharedContainer.writeTextPayload(direction: direction, text: text)
-                }
-            }
-            if provider.hasItemConformingToTypeIdentifier(UTType.text.identifier) {
-                if let text = try? await loadText(from: provider) {
-                    let direction: SharedPayload.Direction =
-                        text.contains("-----BEGIN AGE ENCRYPTED FILE-----") ? .decrypt : .encrypt
-                    return try SharedContainer.writeTextPayload(direction: direction, text: text)
-                }
-            }
-            if provider.hasItemConformingToTypeIdentifier(UTType.data.identifier) {
-                if let url = try? await loadFileURL(from: provider, typeIdentifier: UTType.data.identifier) {
-                    let direction: SharedPayload.Direction = url.pathExtension.lowercased() == "age" ? .decrypt : .encrypt
-                    return try SharedContainer.writeFilePayload(
-                        direction: direction,
-                        sourceFileURL: url,
-                        originalFilename: url.lastPathComponent
-                    )
-                }
+            if let type = fileTypeIdentifier(of: provider) {
+                return try await stageFile(from: provider, typeIdentifier: type)
             }
         }
 
         throw ShareError.unsupportedInput
     }
 
-    private func loadFileURL(from provider: NSItemProvider, typeIdentifier: String) async throws -> URL {
+    /// The registered type to ask for as a file: the age UTI if offered, else
+    /// the first type that is data.
+    private func fileTypeIdentifier(of provider: NSItemProvider) -> String? {
+        if provider.hasItemConformingToTypeIdentifier("org.age-encryption.age") { return "org.age-encryption.age" }
+        return provider.registeredTypeIdentifiers.first { id in
+            guard let t = UTType(id) else { return false }
+            return t.conforms(to: .data) && !t.conforms(to: .url)
+        }
+    }
+
+    /// Copy the shared file into the App Group without reading it into memory
+    /// (L-25). `loadFileRepresentation` hands over a file that is deleted when
+    /// its handler returns, so the copy happens inside the handler.
+    private func stageFile(from provider: NSItemProvider, typeIdentifier: String) async throws -> SharedPayload {
         try await withCheckedThrowingContinuation { continuation in
-            provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { item, error in
-                if let error = error {
+            _ = provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, error in
+                guard let url else {
+                    continuation.resume(throwing: error ?? ShareError.unsupportedInput)
+                    return
+                }
+                do {
+                    let name = provider.suggestedName.map { name -> String in
+                        // suggestedName can drop the extension; keep the file's own.
+                        let ext = url.pathExtension
+                        return ext.isEmpty || (name as NSString).pathExtension.lowercased() == ext.lowercased()
+                            ? name : name + "." + ext
+                    } ?? url.lastPathComponent
+                    continuation.resume(returning: try SharedContainer.writeFilePayload(
+                        sourceFileURL: url, originalFilename: name))
+                } catch {
                     continuation.resume(throwing: error)
-                    return
                 }
-                if let url = item as? URL {
-                    continuation.resume(returning: url)
-                    return
-                }
-                if let data = item as? Data {
-                    let tmp = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("share-\(UUID().uuidString)")
-                    do {
-                        try data.write(to: tmp, options: [.atomic])
-                        continuation.resume(returning: tmp)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                    return
-                }
-                continuation.resume(throwing: ShareError.unsupportedInput)
             }
         }
     }
 
+    /// Text shares are capped: anything bigger belongs in a file.
+    private static let maxTextBytes = 4 * 1024 * 1024
+
     private func loadText(from provider: NSItemProvider) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, error in
+        let type = provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)
+            ? UTType.plainText.identifier : UTType.text.identifier
+        return try await withCheckedThrowingContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -255,14 +249,8 @@ class ShareViewController: UIViewController {
                     continuation.resume(returning: attr.string)
                     return
                 }
-                if let url = item as? URL {
-                    do {
-                        let bytes = try Data(contentsOf: url)
-                        let text = String(data: bytes, encoding: .utf8) ?? ""
-                        continuation.resume(returning: text)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
+                if let data = item as? Data, data.count <= Self.maxTextBytes {
+                    continuation.resume(returning: String(decoding: data, as: UTF8.self))
                     return
                 }
                 continuation.resume(throwing: ShareError.unsupportedInput)

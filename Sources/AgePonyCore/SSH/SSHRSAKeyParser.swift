@@ -9,6 +9,8 @@ public enum SSHRSAKeyParserError: Error {
     case unsupportedKDF(String)
     case checkIntsMismatch
     case keySizeTooSmall(Int)
+    /// Exponent outside OpenSSH's range (odd, 3 <= e < 2^32) or modulus over 16384 bits.
+    case unacceptableKey
 }
 
 public struct SSHRSAPublicKeyParts {
@@ -53,6 +55,8 @@ public enum SSHRSAKeyParser {
         let comment = parts.count >= 3 ? String(parts[2]) : ""
         let nBits = BigUInt(bigEndianBytes: n).bitWidth
         guard nBits >= 2048 else { throw SSHRSAKeyParserError.keySizeTooSmall(nBits) }
+        // Same bounds as a signer (audit L-4): a huge exponent or modulus is a CPU sink.
+        guard (try? SSHSigVerifier.checkRSASigner(e: e, n: n)) != nil else { throw SSHRSAKeyParserError.unacceptableKey }
         return SSHRSAPublicKeyParts(e: e, n: n, wireBlob: blob, comment: comment)
     }
 
@@ -115,9 +119,25 @@ public enum SSHRSAKeyParser {
         let nBits = BigUInt(bigEndianBytes: n).bitWidth
         guard nBits >= 2048 else { throw SSHRSAKeyParserError.keySizeTooSmall(nBits) }
 
+        // The outer public key must be this private key's (n, e).
+        var outer = SSHWireWriter()
+        outer.writeString("ssh-rsa")
+        outer.writeMPInt(e)
+        outer.writeMPInt(n)
+        guard SSHRSAKeyParser.sameRSAPublic(publicBlob, outer.data) else {
+            throw SSHRSAKeyParserError.wireBlobMismatch
+        }
+
         return SSHRSAPrivateKeyParts(
             n: n, e: e, d: d, p: p, q: q, iqmp: iqmp,
             wireBlob: publicBlob, comment: comment
         )
+    }
+
+    /// Compare two ssh-rsa public blobs by their (e, n), ignoring mpint padding quirks.
+    static func sameRSAPublic(_ a: Data, _ b: Data) -> Bool {
+        guard let x = try? SSHSig.rsaComponents(fromWire: a), let y = try? SSHSig.rsaComponents(fromWire: b) else { return false }
+        func strip(_ d: Data) -> Data { Data(d.drop(while: { $0 == 0 })) }
+        return strip(x.e) == strip(y.e) && strip(x.n) == strip(y.n)
     }
 }

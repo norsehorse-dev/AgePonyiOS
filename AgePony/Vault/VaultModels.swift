@@ -12,6 +12,7 @@
 
 import Foundation
 import Security
+import LocalAuthentication
 import AgePonyCore
 
 // MARK: - Identity
@@ -29,6 +30,14 @@ public enum StoredIdentityType: String, Codable, Hashable, CaseIterable {
     /// MLKEM768-X25519 hybrid. Private material is the 32-byte seed; the
     /// public half is derived from it deterministically.
     case postQuantum
+    /// Secure Enclave P-256 decryption key, an `age1tag1…` recipient (5.0.1).
+    case secureEnclaveTag
+    /// Secure Enclave P-256 plus a software ML-KEM-768 half, an `age1tagpq1…`
+    /// recipient (5.0.1). Quantum-safe.
+    case secureEnclaveTagPQ
+    /// A key on a YubiKey's PIV applet (age-plugin-yubikey), decrypting over NFC
+    /// (5.0.1). Opens `piv-p256` and `p256tag` stanzas.
+    case yubikey
     case sshEd25519
     case sshRSA
     case secureEnclaveP256
@@ -40,9 +49,12 @@ public enum StoredIdentityType: String, Codable, Hashable, CaseIterable {
         switch self {
         case .x25519:            return "age X25519"
         case .postQuantum:       return "Post-quantum hybrid"
+        case .secureEnclaveTag:  return "Secure Enclave (age1tag)"
+        case .secureEnclaveTagPQ: return "Secure Enclave, quantum-safe (age1tagpq)"
+        case .yubikey:           return "YubiKey (age1yubikey)"
         case .sshEd25519:        return "SSH Ed25519"
         case .sshRSA:            return "SSH RSA"
-        case .secureEnclaveP256: return "Secure Enclave (P-256)"
+        case .secureEnclaveP256: return "Secure Enclave signing (P-256)"
         case .skEd25519:         return "Security Key (Ed25519)"
         case .skEcdsaP256:       return "Security Key (P-256)"
         }
@@ -59,6 +71,9 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
     ///   sshEd25519: SSH wire blob (`<len=11>"ssh-ed25519"<len=32><pubkey>`)
     ///   sshRSA:    SSH wire blob for ssh-rsa
     ///   secureEnclaveP256: SSH wire blob for ecdsa-sha2-nistp256
+    ///   secureEnclaveTag: 33-byte compressed P-256 point
+    ///   secureEnclaveTagPQ: 1249-byte hybrid public key (ML-KEM ek || P-256 point)
+    ///   yubikey:   33-byte compressed P-256 point of the PIV slot's key
     public let publicKeyMaterial: Data
 
     /// Private material in a type-appropriate form:
@@ -66,6 +81,9 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
     ///   sshEd25519: 64 bytes = seed(32) || pub(32)
     ///   sshRSA:    UTF-8 bytes of the decrypted OpenSSH PEM string
     ///   secureEnclaveP256: the SE key's opaque dataRepresentation
+    ///   secureEnclaveTag: the SE key's opaque dataRepresentation
+    ///   secureEnclaveTagPQ: ML-KEM seed (64 bytes, d || z) || SE dataRepresentation
+    ///   yubikey:   the 9-byte age-plugin-yubikey stub (serial, slot, tag); not secret
     public let privateKeyMaterial: Data
 
     /// Optional SSH comment ("user@host"), GitHub username, etc.
@@ -93,10 +111,33 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
 
     // MARK: - Hydration
 
+    /// Length of the ML-KEM seed at the front of a `secureEnclaveTagPQ` key.
+    static let mlkemSeedSize = 64
+
     /// Construct the concrete crypto-layer identity type for use with
-    /// `Age.decrypt(ciphertext:identities:)`.
-    public func toAgeIdentity() throws -> any AgeIdentity {
+    /// `Age.decrypt(ciphertext:identities:)`. `authenticationContext` is an
+    /// LAContext the caller has just evaluated; a Secure Enclave key that wants
+    /// presence for each use takes it instead of prompting a second time.
+    public func toAgeIdentity(authenticationContext: LAContext? = nil) throws -> any AgeIdentity {
         switch type {
+        case .secureEnclaveTag:
+            let se = SecureEnclaveKeyAgreement(dataRepresentation: privateKeyMaterial,
+                                               authenticationContext: authenticationContext)
+            return try TagIdentity.classic(publicKey: publicKeyMaterial, p256: se)
+        case .secureEnclaveTagPQ:
+            guard privateKeyMaterial.count > Self.mlkemSeedSize,
+                  publicKeyMaterial.count == HpkeP256.hybridPublicKeySize else {
+                throw VaultModelError.malformedPrivateMaterial(type)
+            }
+            let se = SecureEnclaveKeyAgreement(dataRepresentation: Data(privateKeyMaterial.dropFirst(Self.mlkemSeedSize)),
+                                               authenticationContext: authenticationContext)
+            return try TagIdentity.hybrid(mlkemSeed: Data(privateKeyMaterial.prefix(Self.mlkemSeedSize)),
+                                          p256PublicKey: Data(publicKeyMaterial.suffix(P256Curve.uncompressedSize)),
+                                          p256: se)
+        case .yubikey:
+            // Needs an NFC tap first; the decrypt flows run that and build a
+            // YubiKeyIdentity with the recorded results (see YubiKeyDecrypt).
+            throw VaultModelError.needsYubiKeyTap
         case .x25519:
             return try X25519Identity(privateKey: privateKeyMaterial)
         case .sshEd25519:
@@ -143,6 +184,10 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
             return try SSHRSARecipient(sshPublicKeyLine: line)
         case .postQuantum:
             return try HybridRecipient(publicKey: publicKeyMaterial)
+        case .secureEnclaveTag, .secureEnclaveTagPQ:
+            return try TagRecipient(publicKey: publicKeyMaterial)
+        case .yubikey:
+            return try P256Recipient(compressedPublicKey: publicKeyMaterial)
         case .secureEnclaveP256:
             // Signing-only — not usable as an age recipient.
             throw VaultModelError.signingOnlyIdentity(type)
@@ -159,6 +204,7 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
         case .x25519:                 return false
         // ML-KEM is a key encapsulation mechanism, not a signature scheme.
         case .postQuantum:            return false
+        case .secureEnclaveTag, .secureEnclaveTagPQ, .yubikey: return false
         case .sshEd25519, .sshRSA:    return true
         case .secureEnclaveP256:      return true
         case .skEd25519, .skEcdsaP256: return true
@@ -172,6 +218,7 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
         switch type {
         case .x25519, .sshEd25519, .sshRSA: return true
         case .postQuantum:                  return true
+        case .secureEnclaveTag, .secureEnclaveTagPQ, .yubikey: return true
         case .secureEnclaveP256:            return false
         case .skEd25519, .skEcdsaP256:      return false
         }
@@ -181,6 +228,38 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
     /// sk-*), which requires the async NFC signing path rather than FileSigner.
     public var isSecurityKey: Bool {
         type == .skEd25519 || type == .skEcdsaP256
+    }
+
+    /// Whether this identity decrypts in hardware (5.0.1): the private key can't
+    /// be revealed, exported, transferred or put on paper.
+    public var isHardwareDecryptionKey: Bool {
+        type == .secureEnclaveTag || type == .secureEnclaveTagPQ || type == .yubikey
+    }
+
+    /// The age-plugin-yubikey stub of a `yubikey` identity.
+    public var yubiKeyStub: YubiKeyStub? {
+        guard type == .yubikey else { return nil }
+        return try? YubiKeyStub(bytes: privateKeyMaterial)
+    }
+
+    /// A stand-in for a hardware identity that can only tell which stanzas are
+    /// addressed to it, from public data. Never touches the Enclave or the YubiKey.
+    public func hardwareProbe() -> HardwareIdentity? {
+        let none = RecordedKeyAgreement(results: [:])
+        switch type {
+        case .secureEnclaveTag:
+            return try? TagIdentity.classic(publicKey: publicKeyMaterial, p256: none)
+        case .secureEnclaveTagPQ:
+            guard privateKeyMaterial.count > Self.mlkemSeedSize else { return nil }
+            return try? TagIdentity.hybrid(mlkemSeed: Data(privateKeyMaterial.prefix(Self.mlkemSeedSize)),
+                                           p256PublicKey: Data(publicKeyMaterial.suffix(P256Curve.uncompressedSize)),
+                                           p256: none)
+        case .yubikey:
+            guard let stub = yubiKeyStub else { return nil }
+            return try? YubiKeyIdentity.probe(stub: stub, publicKey: publicKeyMaterial)
+        default:
+            return nil
+        }
     }
 
     /// Public-key display form, suitable for an AgePonyKeyBlock.
@@ -203,6 +282,10 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
             return "ssh-rsa \(b64)" + (sshComment.map { " \($0)" } ?? "")
         case .postQuantum:
             return Bech32.encodePostQuantumRecipient(Array(publicKeyMaterial))
+        case .secureEnclaveTag, .secureEnclaveTagPQ:
+            return (try? TagRecipient(publicKey: publicKeyMaterial).toBech32()) ?? "(invalid hardware key)"
+        case .yubikey:
+            return Bech32.encodeYubiKeyRecipient(Array(publicKeyMaterial))
         case .secureEnclaveP256:
             let b64 = publicKeyMaterial.base64EncodedString()
             return "ecdsa-sha2-nistp256 \(b64)" + (sshComment.map { " \($0)" } ?? "")
@@ -246,6 +329,12 @@ public struct StoredIdentity: Codable, Identifiable, Hashable {
                 return id.ageIdentityString
             }
             return "(invalid post-quantum identity)"
+        case .secureEnclaveTag, .secureEnclaveTagPQ:
+            return "(Secure Enclave: decryption happens inside this iPhone's hardware, and the private key can't be exported)"
+        case .yubikey:
+            // Not secret: the age-plugin-yubikey identity line, which only points
+            // at the key on the YubiKey. Useful for setting the same key up elsewhere.
+            return yubiKeyStub?.encode() ?? "(invalid YubiKey stub)"
         case .secureEnclaveP256:
             return "(Secure Enclave — the private key is generated in hardware and never leaves this device)"
         case .skEd25519, .skEcdsaP256:
@@ -290,6 +379,13 @@ public enum StoredRecipientType: String, Codable, Hashable, CaseIterable {
     case postQuantum
     case sshEd25519
     case sshRSA
+    /// piv-p256 (age-plugin-yubikey), an `age1yubikey1…` recipient. Only the
+    /// YubiKey can decrypt.
+    case yubikey
+    /// A hardware P-256 key, an `age1tag1…` recipient (age 1.3; 5.0.1).
+    case tag
+    /// A hardware P-256 key with an ML-KEM-768 half, an `age1tagpq1…` recipient.
+    case tagPQ
 
     /// Section heading for a group of these. See `StoredIdentityType`.
     public var sectionTitle: String {
@@ -298,6 +394,9 @@ public enum StoredRecipientType: String, Codable, Hashable, CaseIterable {
         case .postQuantum: return "Post-quantum hybrid"
         case .sshEd25519: return "SSH Ed25519"
         case .sshRSA:     return "SSH RSA"
+        case .yubikey:    return "YubiKey (piv-p256)"
+        case .tag:        return "Hardware key (age1tag)"
+        case .tagPQ:      return "Hardware key, quantum-safe (age1tagpq)"
         }
     }
 
@@ -308,7 +407,7 @@ public enum StoredRecipientType: String, Codable, Hashable, CaseIterable {
     /// One switch, used by every paste path.
     public var pastedSource: StoredRecipientSource {
         switch self {
-        case .x25519, .postQuantum: return .pasteAge
+        case .x25519, .postQuantum, .yubikey, .tag, .tagPQ: return .pasteAge
         case .sshEd25519, .sshRSA:  return .pasteSSH
         }
     }
@@ -354,6 +453,32 @@ public struct StoredRecipient: Codable, Identifiable, Hashable {
     }
 }
 
+// MARK: - Recycle bin (4.0.0)
+
+/// A soft-deleted identity awaiting restore or expiry.
+public struct TrashedIdentity: Codable, Identifiable, Hashable {
+    public var id: UUID { identity.id }
+    public let identity: StoredIdentity
+    public let deletedAt: Date
+
+    public init(identity: StoredIdentity, deletedAt: Date) {
+        self.identity = identity
+        self.deletedAt = deletedAt
+    }
+}
+
+/// A soft-deleted recipient awaiting restore or expiry.
+public struct TrashedRecipient: Codable, Identifiable, Hashable {
+    public var id: UUID { recipient.id }
+    public let recipient: StoredRecipient
+    public let deletedAt: Date
+
+    public init(recipient: StoredRecipient, deletedAt: Date) {
+        self.recipient = recipient
+        self.deletedAt = deletedAt
+    }
+}
+
 // MARK: - Note (stubbed for 1c; full surface added in 1f)
 
 public struct StoredNote: Codable, Identifiable, Hashable {
@@ -385,4 +510,6 @@ public enum VaultModelError: Error, Equatable {
     case malformedPublicMaterial(StoredIdentityType)
     case malformedPrivateMaterial(StoredIdentityType)
     case signingOnlyIdentity(StoredIdentityType)
+    /// A YubiKey identity, which decrypts only after an NFC tap.
+    case needsYubiKeyTap
 }

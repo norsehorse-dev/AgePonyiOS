@@ -53,12 +53,18 @@ public enum BcryptPBKDF {
         case invalidInput
     }
 
+    /// Most rounds accepted (audit L-10). ssh-keygen's default is 16 and its `-a` values
+    /// stay in the hundreds; without a cap a crafted key hangs the app indefinitely.
+    public static let maxRounds = 10_000
+    /// Longest salt accepted. ssh-keygen writes 16 bytes.
+    public static let maxSaltLength = 1024
+
     /// `bcrypt_pbkdf` — OpenBSD's password-based KDF used by OpenSSH for encrypted PEMs.
     /// Returns `keylen` bytes of derived key material.
     ///
     /// Note: rounds < 1 is rejected; `keylen` must be positive.
     public static func bcryptPBKDF(password: Data, salt: Data, rounds: Int, keylen: Int) throws -> Data {
-        guard rounds >= 1, !password.isEmpty, !salt.isEmpty, keylen > 0,
+        guard rounds >= 1, rounds <= maxRounds, !password.isEmpty, !salt.isEmpty, salt.count <= maxSaltLength, keylen > 0,
               keylen <= 1024 else {  // OpenBSD limit: 32*32 = 1024
             throw BcryptError.invalidInput
         }

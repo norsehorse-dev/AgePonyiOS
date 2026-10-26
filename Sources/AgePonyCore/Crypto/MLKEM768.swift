@@ -37,6 +37,8 @@ public enum MLKEMError: Error, Equatable {
     case invalidDecapsulationKeyLength
     case invalidCiphertextLength
     case invalidMessageLength
+    /// An encapsulation key with a coefficient that isn't reduced mod q (FIPS 203 7.2).
+    case malformedEncapsulationKey
 }
 
 public enum MLKEM768 {
@@ -437,6 +439,21 @@ public enum MLKEM768 {
         return keyGenInternal(d: d, z: z)
     }
 
+    /// FIPS 203 7.2 input check: every 12-bit coefficient of the encoded t-hat must be
+    /// below q. Equivalent to ByteEncode_12(ByteDecode_12(ek)) == ek.
+    public static func isValidEncapsulationKey(_ ek: Data) -> Bool {
+        guard ek.count == encapsulationKeySize else { return false }
+        let b = Array(ek)
+        var i = 0
+        while i < 384 * k {
+            let c0 = Int32(b[i]) | (Int32(b[i + 1] & 0x0f) << 8)
+            let c1 = Int32(b[i + 1] >> 4) | (Int32(b[i + 2]) << 4)
+            if c0 >= q || c1 >= q { return false }
+            i += 3
+        }
+        return true
+    }
+
     /// Encapsulate to `encapsulationKey`, returning the shared secret and ciphertext.
     ///
     /// `message` supplies the 32 bytes of encapsulation randomness. When nil, fresh
@@ -447,6 +464,9 @@ public enum MLKEM768 {
         message: Data? = nil
     ) throws -> (sharedSecret: Data, ciphertext: Data) {
         guard ek.count == encapsulationKeySize else { throw MLKEMError.invalidEncapsulationKeyLength }
+        // FIPS 203 7.2 modulus check (audit L-12): a key that fails it gives a file nobody
+        // can decrypt, so refuse to encrypt to it.
+        guard isValidEncapsulationKey(ek) else { throw MLKEMError.malformedEncapsulationKey }
         let m: Data
         if let message {
             guard message.count == messageSize else { throw MLKEMError.invalidMessageLength }

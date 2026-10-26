@@ -48,10 +48,13 @@ public struct AgeFileSummary: Equatable {
     /// nil for the URL-based inspection, which never reads past the header —
     /// that is the point of it. Callers decrypt from the file instead.
     public let binaryBytes: Data?
+    /// The header's stanzas as parsed, for working out up front which hardware
+    /// key a file needs (a YubiKey tap is asked for before decrypting).
+    public var rawStanzas: [Stanza] = []
 
     /// True if any recipient is post-quantum.
     public var isPostQuantum: Bool {
-        stanzas.contains { $0.kind == .postQuantum }
+        stanzas.contains { $0.kind == .postQuantum || $0.kind == .tagPQ }
     }
 
     /// True if a stanza names one of the user's own identities.
@@ -63,9 +66,15 @@ public struct AgeFileSummary: Equatable {
         stanzas.contains { $0.matchedIdentityName != nil }
     }
 
-    /// The scrypt work factor, when this is a passphrase file.
+    /// How many stanzas are recipients (the signature stanza isn't one).
+    public var recipientCount: Int {
+        stanzas.filter { $0.kind != .signature }.count
+    }
+
+    /// The scrypt work factor, when this is a passphrase file. The largest across
+    /// stanzas (audit L-2), so the memory guard can't be steered by the first one.
     public var scryptWorkFactor: Int? {
-        stanzas.compactMap(\.scryptWorkFactor).first
+        stanzas.compactMap(\.scryptWorkFactor).max()
     }
 }
 
@@ -90,6 +99,11 @@ public struct StanzaSummary: Equatable, Identifiable {
         case sshRSA        = "ssh-rsa"
         case scrypt        = "scrypt"
         case postQuantum   = "mlkem768x25519"
+        case yubikey       = "piv-p256"
+        case tag           = "p256tag"
+        case tagPQ         = "mlkem768p256tag"
+        /// AgePony's encrypted signature stanza (5.0.1). Not a recipient.
+        case signature     = "agepony.com/sig"
         case unknown       = "unknown"
 
         public var displayLabel: String {
@@ -99,6 +113,10 @@ public struct StanzaSummary: Equatable, Identifiable {
             case .sshRSA:      return "SSH RSA recipient"
             case .scrypt:      return "Passphrase (scrypt)"
             case .postQuantum: return "Post-quantum recipient"
+            case .yubikey:     return "YubiKey (piv-p256) recipient"
+            case .tag:         return "Hardware key (age1tag) recipient"
+            case .tagPQ:       return "Quantum-safe hardware key (age1tagpq) recipient"
+            case .signature:   return "AgePony signature (encrypted): only a recipient can see who signed"
             case .unknown:     return "Unknown recipient type"
             }
         }
@@ -256,6 +274,11 @@ public enum AgeFileInspector {
         knownIdentities: [StoredIdentity]
     ) -> AgeFileSummary {
         let identityTags = sshTagsByIdentityName(knownIdentities)
+        // Hardware keys can say from public data alone whether a stanza is theirs.
+        let hardware = knownIdentities.compactMap { id in id.hardwareProbe().map { (id.name, $0) } }
+        func hardwareMatch(_ stanza: Stanza) -> String? {
+            hardware.first { $0.1.matches(stanza: stanza) }?.0
+        }
 
         var summaries: [StanzaSummary] = []
         summaries.reserveCapacity(header.stanzas.count)
@@ -283,6 +306,14 @@ public enum AgeFileInspector {
                 summaries.append(StanzaSummary(kind: .scrypt, scryptWorkFactor: factor))
             case "mlkem768x25519":
                 summaries.append(StanzaSummary(kind: .postQuantum))
+            case "piv-p256":
+                summaries.append(StanzaSummary(kind: .yubikey, matchedIdentityName: hardwareMatch(stanza)))
+            case TagRecipient.classicStanzaType:
+                summaries.append(StanzaSummary(kind: .tag, matchedIdentityName: hardwareMatch(stanza)))
+            case TagRecipient.hybridStanzaType:
+                summaries.append(StanzaSummary(kind: .tagPQ, matchedIdentityName: hardwareMatch(stanza)))
+            case SignatureStanza.type:
+                summaries.append(StanzaSummary(kind: .signature))
             default:
                 summaries.append(StanzaSummary(kind: .unknown))
             }
@@ -290,13 +321,15 @@ public enum AgeFileInspector {
 
         let onlyScrypt = !summaries.isEmpty && summaries.allSatisfy { $0.kind == .scrypt }
 
-        return AgeFileSummary(
+        var summary = AgeFileSummary(
             byteCount: byteCount,
             armored: armored,
             stanzas: summaries,
             onlyScrypt: onlyScrypt,
             binaryBytes: binaryBytes
         )
+        summary.rawStanzas = header.stanzas
+        return summary
     }
 
     /// Compute the SSH stanza tag for each SSH identity in the vault.
@@ -314,7 +347,8 @@ public enum AgeFileInspector {
                 map[b64] = identity.name
             // No SSH tag: like X25519, the post-quantum stanza is anonymous,
             // so a file cannot advertise that it is addressed to you.
-            case .x25519, .postQuantum, .secureEnclaveP256, .skEd25519, .skEcdsaP256:
+            case .x25519, .postQuantum, .secureEnclaveP256, .skEd25519, .skEcdsaP256,
+                 .secureEnclaveTag, .secureEnclaveTagPQ, .yubikey:
                 continue
             }
         }

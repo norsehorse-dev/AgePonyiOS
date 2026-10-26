@@ -58,6 +58,7 @@ struct TextEncryptView: View {
                     identities: vault.identities,
                     savedRecipients: vault.recipients,
                     initiallySelectedIdentityIDs: defaultSelectedIdentityIDs,
+                    initiallySelectedRecipientIDs: vault.backupRecipientSelection,
                     onConfirm: { recipients, passphrase in
                         self.recipients = recipients
                         self.passphrase = passphrase
@@ -80,6 +81,8 @@ struct TextEncryptView: View {
     private var inputSection: some View {
         Section {
             TextEditor(text: $inputText)
+                // No keyboard learning from what's typed here (L-23).
+                .autocorrectionDisabled()
                 .frame(minHeight: 180)
                 .font(AgePonyTypography.body)
                 .disabled(resultArmored != nil)
@@ -250,15 +253,7 @@ struct TextEncryptView: View {
 
     private func copyResult() {
         guard let result = resultArmored else { return }
-        let pasteboard = UIPasteboard.general
-        let expiry = Date().addingTimeInterval(60)
-        pasteboard.setItems(
-            [[UIPasteboard.typeAutomatic: result]],
-            options: [
-                .expirationDate: expiry,
-                .localOnly: true
-            ]
-        )
+        ClipboardPreferences.copy(result)
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
     }

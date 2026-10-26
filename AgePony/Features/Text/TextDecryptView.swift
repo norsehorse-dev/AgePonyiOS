@@ -23,6 +23,10 @@ struct TextDecryptView: View {
     @State private var resultPlaintext: String?
     @State private var working: Bool = false
     @State private var errorMessage: String?
+    /// YubiKey PIV PIN for this decrypt only, after the key asked for it.
+    @State private var yubiKeyPIN: String?
+    @State private var showYubiKeyPIN = false
+    @State private var yubiKeyPINNote: String?
     @State private var copied: Bool = false
 
     @Environment(\.dismiss) private var dismiss
@@ -63,6 +67,10 @@ struct TextDecryptView: View {
                 inspect()
             }
         }
+        .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote) { pin in
+            yubiKeyPIN = pin
+            Task { await startDecrypt(afterPIN: true) }
+        }
         .alert(
             "Decrypt failed",
             isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
@@ -76,6 +84,8 @@ struct TextDecryptView: View {
     private var inputSection: some View {
         Section {
             TextEditor(text: $inputText)
+                // No keyboard learning from what's typed here (L-23).
+                .autocorrectionDisabled()
                 .font(AgePonyTypography.monoCaption)
                 .frame(minHeight: 160)
                 .textInputAutocapitalization(.never)
@@ -207,12 +217,12 @@ struct TextDecryptView: View {
 
     /// Handles the biometric prompt (which must run on MainActor) before
     /// kicking the actual decrypt onto a background queue.
-    private func startDecrypt() async {
+    private func startDecrypt(afterPIN: Bool = false) async {
         guard let summary else { return }
         working = true
         errorMessage = nil
 
-        if !summary.onlyScrypt {
+        if !summary.onlyScrypt && !afterPIN {
             // Identity path needs biometric to reveal private keys.
             do {
                 try await BiometricGate.authenticate(reason: "Decrypt text")
@@ -226,9 +236,29 @@ struct TextDecryptView: View {
             }
         }
 
+        var identitiesSnapshot: [any AgeIdentity] = []
+        if !summary.onlyScrypt {
+            switch await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: yubiKeyPIN) {
+            case .ready(let ids):
+                identitiesSnapshot = ids
+            case .needsPIN(let note):
+                yubiKeyPINNote = note
+                showYubiKeyPIN = true
+                working = false
+                return
+            case .cancelled:
+                working = false
+                return
+            case .failed(let message):
+                errorMessage = message
+                working = false
+                return
+            }
+        }
+        yubiKeyPIN = nil
+
         let passphraseSnapshot = passphraseInput
         let summarySnapshot = summary
-        let identitiesSnapshot = vault.identities.compactMap { try? $0.toAgeIdentity() }
         // Text mode always inspects buffered bytes, so the payload is present.
         // The file flow uses the header-only inspector, where it is nil by design.
         let binarySnapshot = summarySnapshot.binaryBytes ?? Data()
@@ -264,15 +294,7 @@ struct TextDecryptView: View {
 
     private func copyResult() {
         guard let result = resultPlaintext else { return }
-        let pasteboard = UIPasteboard.general
-        let expiry = Date().addingTimeInterval(60)
-        pasteboard.setItems(
-            [[UIPasteboard.typeAutomatic: result]],
-            options: [
-                .expirationDate: expiry,
-                .localOnly: true
-            ]
-        )
+        ClipboardPreferences.copy(result)
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
     }
@@ -306,7 +328,7 @@ private struct FileInfoSection: View {
             HStack(spacing: 16) {
                 meta("Size", ByteCountFormatter.string(fromByteCount: Int64(summary.byteCount), countStyle: .file))
                 meta("Format", summary.armored ? "PEM-armored" : "Binary")
-                meta("Recipients", "\(summary.stanzas.count)")
+                meta("Recipients", "\(summary.recipientCount)")
                 Spacer()
             }
 
@@ -349,6 +371,10 @@ private struct FileInfoSection: View {
         case .sshRSA:      return "lock.shield"
         case .scrypt:      return "lock.rectangle"
         case .postQuantum: return "atom"
+        case .yubikey:     return "key"
+        case .tag:         return "cpu"
+        case .tagPQ:       return "cpu"
+        case .signature:   return "signature"
         case .unknown:     return "questionmark.circle"
         }
     }

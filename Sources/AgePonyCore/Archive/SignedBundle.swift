@@ -8,9 +8,24 @@
 //  signer's identity hidden inside the ciphertext.
 //
 //  Entry order:
-//    `.agepony-signed`  marker + manifest ("agepony-signed/1\nname=<original>\n")
-//    `payload`          the original file bytes, which are what was signed
-//    `payload.sig`      the armored SSHSIG over `payload`
+//    `.agepony-signed`  marker + manifest ("agepony-signed/<v>\nname=<original>\n")
+//    `payload`          the original file bytes
+//    `payload.sig`      the armored SSHSIG
+//
+//  Versions (audit L-8). Both are read; new bundles are written as v2.
+//
+//    v1, manifest first line `agepony-signed/1` (or any other `agepony-signed/` line):
+//    SSHSIG over the payload, namespace "agepony". The name isn't covered.
+//
+//    v2, manifest first line exactly `agepony-signed/2`: SSHSIG under namespace
+//    "agepony-bundle-v2" over
+//
+//      M = string "agepony.com/bundle v2"
+//          string manifest            (the exact bytes of the `.agepony-signed` entry)
+//          string SHA-512(payload)
+//
+//    `string` is SSH wire framing. Relabelling a v2 manifest as `/1` doesn't downgrade
+//    it: the v1 check needs namespace "agepony", which a v2 signature doesn't carry.
 //
 //  `parse` returns nil for anything that isn't a signed bundle — a plain file, or an
 //  ordinary multi-file tar whose first entry isn't the marker — so the decrypt path can
@@ -41,7 +56,14 @@ public enum SignedBundle {
     static let payloadName = "payload"
     static let signatureName = "payload.sig"
     static let versionLine = "agepony-signed/1"
+    static let versionLineV2 = "agepony-signed/2"
     static let manifestPrefix = "agepony-signed/"
+
+    /// SSHSIG namespace of a v2 bundle signature.
+    public static let namespaceV2 = "agepony-bundle-v2"
+
+    /// First field of the v2 signed message.
+    public static let messageDomainV2 = "agepony.com/bundle v2"
 
     static let maxManifest = 4096
     static let maxSignature = 8192
@@ -54,6 +76,41 @@ public enum SignedBundle {
         public let name: String
         public let payload: Data
         public let signatureArmored: String
+        /// 1 or 2.
+        public let version: Int
+        /// The marker entry's exact bytes (what a v2 signature covers).
+        public let manifest: Data
+
+        public init(name: String, payload: Data, signatureArmored: String, version: Int = 1, manifest: Data = Data()) {
+            self.name = name
+            self.payload = payload
+            self.signatureArmored = signatureArmored
+            self.version = version
+            self.manifest = manifest
+        }
+
+        /// True for v2: `name` is covered by the signature. For v1 the UI should call
+        /// the name unsigned.
+        public var nameCovered: Bool { version >= 2 }
+
+        /// SSHSIG namespace this version signs under.
+        public var namespace: String { SignedBundle.namespace(forVersion: version) }
+
+        /// The exact message the SSHSIG covers.
+        public func signedMessage() -> Data {
+            guard version >= 2 else { return payload }
+            return SignedBundle.v2Message(manifest: manifest, payloadSHA512: Data(SHA512.hash(data: payload)))
+        }
+
+        /// Verify `signatureArmored` under this version's namespace and message.
+        @discardableResult
+        public func verify() throws -> SSHSigVerification {
+            try SSHSigVerifier.verify(
+                message: signedMessage(),
+                armoredSignature: signatureArmored,
+                expectedNamespace: namespace
+            )
+        }
     }
 
     /// What a streamed bundle carried. The payload itself went to the caller's output, so
@@ -63,17 +120,48 @@ public enum SignedBundle {
         public let signatureArmored: String
         public let payloadSize: Int64
         private let hashes: [SSHSigHash: Data]
+        /// 1 or 2.
+        public let version: Int
+        /// The marker entry's exact bytes (what a v2 signature covers).
+        public let manifest: Data
 
         internal init(
             name: String,
             signatureArmored: String,
             payloadSize: Int64,
-            hashes: [SSHSigHash: Data]
+            hashes: [SSHSigHash: Data],
+            version: Int = 1,
+            manifest: Data = Data()
         ) {
             self.name = name
             self.signatureArmored = signatureArmored
             self.payloadSize = payloadSize
             self.hashes = hashes
+            self.version = version
+            self.manifest = manifest
+        }
+
+        /// True for v2: `name` is covered by the signature.
+        public var nameCovered: Bool { version >= 2 }
+
+        /// SSHSIG namespace this version signs under.
+        public var namespace: String { SignedBundle.namespace(forVersion: version) }
+
+        /// H(signed message) under `algorithm`: the payload hash for v1, the hash of the
+        /// v2 message for v2. What a hashed verify asks for.
+        public func messageDigest(_ algorithm: SSHSigHash) -> Data {
+            guard version >= 2 else { return hash(algorithm) }
+            return algorithm.digest(SignedBundle.v2Message(manifest: manifest, payloadSHA512: hash(.sha512)))
+        }
+
+        /// Verify `signatureArmored` under this version's namespace and message.
+        @discardableResult
+        public func verify() throws -> SSHSigVerification {
+            try SSHSigVerifier.verify(
+                armoredSignature: signatureArmored,
+                expectedNamespace: namespace,
+                messageHash: { messageDigest($0) }
+            )
         }
 
         /// The payload's hash under the given SSHSIG hash algorithm.
@@ -86,16 +174,89 @@ public enum SignedBundle {
         }
     }
 
+    // MARK: - v2
+
+    /// The manifest a v2 bundle carries for `originalName`.
+    public static func manifestV2(originalName: String) -> Data {
+        Data("\(versionLineV2)\nname=\(sanitize(originalName))\n".utf8)
+    }
+
+    /// The v2 signed message for a bundle whose marker entry holds `manifest`.
+    public static func v2Message(manifest: Data, payloadSHA512: Data) -> Data {
+        precondition(payloadSHA512.count == 64, "payload hash must be SHA-512 (64 bytes)")
+        var w = SSHWireWriter()
+        w.writeString(Data(messageDomainV2.utf8))
+        w.writeString(manifest)
+        w.writeString(payloadSHA512)
+        return w.data
+    }
+
+    /// What to sign for a v2 bundle: SHA-512 of `v2Message` for `originalName` and a
+    /// payload whose SHA-512 is `payloadSHA512`. Hand it to a hashed signer with
+    /// namespace `namespaceV2` and hash sha512, then pass the same `originalName` to
+    /// `buildV2`, `buildStreamV2` or `bundleSourceV2`.
+    public static func v2MessageHash(originalName: String, payloadSHA512: Data) -> Data {
+        SSHSigHash.sha512.digest(v2Message(manifest: manifestV2(originalName: originalName), payloadSHA512: payloadSHA512))
+    }
+
+    /// `build` for a v2 bundle; `signatureArmored` must be over `v2MessageHash`'s message.
+    public static func buildV2(originalName: String, payload: Data, signatureArmored: String) throws -> Data {
+        try build(manifest: manifestV2(originalName: originalName), payload: payload, signatureArmored: signatureArmored)
+    }
+
+    /// `buildStream` for a v2 bundle. Byte-identical to `buildV2`.
+    public static func buildStreamV2(
+        into out: OutputStream,
+        originalName: String,
+        payloadSize: Int64,
+        payload: InputStream,
+        signatureArmored: String
+    ) throws {
+        try buildStream(into: out, manifest: manifestV2(originalName: originalName),
+                        payloadSize: payloadSize, payload: payload, signatureArmored: signatureArmored)
+    }
+
+    /// `bundleSource` for a v2 bundle. Produces exactly the bytes `buildV2` would.
+    public static func bundleSourceV2(
+        originalName: String,
+        payloadSize: Int64,
+        payload: InputStream,
+        signatureArmored: String
+    ) throws -> InputStream {
+        try source(manifest: manifestV2(originalName: originalName), payloadSize: payloadSize,
+                   payload: payload, signatureArmored: signatureArmored)
+    }
+
+    /// `sizeOf` for a v2 bundle.
+    public static func sizeOfV2(originalName: String, payloadSize: Int64, signatureArmored: String) -> Int64 {
+        sizeOf(manifest: manifestV2(originalName: originalName), payloadSize: payloadSize, signatureArmored: signatureArmored)
+    }
+
+    static func namespace(forVersion version: Int) -> String {
+        version >= 2 ? namespaceV2 : SSHSig.defaultNamespace
+    }
+
+    /// 2 when the manifest's first line is exactly `agepony-signed/2`, else 1.
+    static func version(ofManifest manifest: Data) -> Int {
+        let text = String(decoding: manifest, as: UTF8.self)
+        let first = text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "\r\n" }).first
+        return first.map(String.init) == versionLineV2 ? 2 : 1
+    }
+
     // MARK: - Buffered
 
-    /// Build the bundle from a payload and its armored SSHSIG.
+    /// Build a v1 bundle from a payload and its armored SSHSIG. New bundles use `buildV2`.
     public static func build(
         originalName: String,
         payload: Data,
         signatureArmored: String
     ) throws -> Data {
-        let manifest = Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8)
-        return try TarArchive.create([
+        try build(manifest: Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8),
+                  payload: payload, signatureArmored: signatureArmored)
+    }
+
+    static func build(manifest: Data, payload: Data, signatureArmored: String) throws -> Data {
+        try TarArchive.create([
             TarArchive.Entry(name: marker, data: manifest),
             TarArchive.Entry(name: payloadName, data: payload),
             TarArchive.Entry(name: signatureName, data: Data(signatureArmored.utf8)),
@@ -115,7 +276,9 @@ public enum SignedBundle {
         return Parsed(
             name: name(fromManifest: manifestText),
             payload: payload.data,
-            signatureArmored: String(decoding: signature.data, as: UTF8.self)
+            signatureArmored: String(decoding: signature.data, as: UTF8.self),
+            version: version(ofManifest: first.data),
+            manifest: first.data
         )
     }
 
@@ -142,7 +305,17 @@ public enum SignedBundle {
         payload: InputStream,
         signatureArmored: String
     ) throws {
-        let manifest = Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8)
+        try buildStream(into: out, manifest: Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8),
+                        payloadSize: payloadSize, payload: payload, signatureArmored: signatureArmored)
+    }
+
+    static func buildStream(
+        into out: OutputStream,
+        manifest: Data,
+        payloadSize: Int64,
+        payload: InputStream,
+        signatureArmored: String
+    ) throws {
         try TarArchive.writeEntry(to: out, name: marker, data: manifest)
         try TarArchive.writeEntry(to: out, name: payloadName, size: payloadSize, from: payload)
         try TarArchive.writeEntry(to: out, name: signatureName, data: Data(signatureArmored.utf8))
@@ -160,7 +333,16 @@ public enum SignedBundle {
         payload: InputStream,
         signatureArmored: String
     ) throws -> InputStream {
-        let manifest = Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8)
+        try source(manifest: Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8),
+                   payloadSize: payloadSize, payload: payload, signatureArmored: signatureArmored)
+    }
+
+    static func source(
+        manifest: Data,
+        payloadSize: Int64,
+        payload: InputStream,
+        signatureArmored: String
+    ) throws -> InputStream {
         let signature = Data(signatureArmored.utf8)
         return try TarArchive.source([
             TarArchive.StreamEntry(name: marker, size: Int64(manifest.count)) {
@@ -182,7 +364,11 @@ public enum SignedBundle {
         payloadSize: Int64,
         signatureArmored: String
     ) -> Int64 {
-        let manifest = Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8)
+        sizeOf(manifest: Data("\(versionLine)\nname=\(sanitize(originalName))\n".utf8),
+               payloadSize: payloadSize, signatureArmored: signatureArmored)
+    }
+
+    static func sizeOf(manifest: Data, payloadSize: Int64, signatureArmored: String) -> Int64 {
         let signature = Data(signatureArmored.utf8)
         return TarArchive.sizeOf([
             TarArchive.StreamEntry(name: marker, size: Int64(manifest.count)) { InputStream(data: Data()) },
@@ -472,7 +658,9 @@ public final class SignedBundleUnwrappingSink: OutputStream {
             hashes: [
                 .sha256: Data(sha256.finalize()),
                 .sha512: Data(sha512.finalize()),
-            ]
+            ],
+            version: SignedBundle.version(ofManifest: manifest),
+            manifest: manifest
         )
     }
 }

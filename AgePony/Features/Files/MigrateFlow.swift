@@ -35,6 +35,10 @@ struct MigrateFlow: View {
     @State private var progressFraction: Double?
     @State private var result: MigrateService.Output?
     @State private var errorMessage: String?
+    /// YubiKey PIV PIN for this decrypt only, after the key asked for it.
+    @State private var yubiKeyPIN: String?
+    @State private var showYubiKeyPIN = false
+    @State private var yubiKeyPINNote: String?
     @State private var showFilePicker: Bool = false
     @State private var showRecipientPicker: Bool = false
 
@@ -78,6 +82,10 @@ struct MigrateFlow: View {
                         onSaveRecipient: { try vault.addRecipient($0) }
                     )
                 }
+            }
+            .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote) { pin in
+                yubiKeyPIN = pin
+                Task { await runMigrate(afterPIN: true) }
             }
             .alert(
                 "Re-encrypt failed",
@@ -281,10 +289,10 @@ struct MigrateFlow: View {
         }
     }
 
-    private func runMigrate() async {
+    private func runMigrate(afterPIN: Bool = false) async {
         guard let url = sourceURL, let summary else { return }
 
-        if !summary.onlyScrypt {
+        if !summary.onlyScrypt && !afterPIN {
             do {
                 try await BiometricGate.authenticate(reason: "Re-encrypt \"\(sourceName)\"")
             } catch BiometricGateError.userCancelled {
@@ -295,6 +303,24 @@ struct MigrateFlow: View {
             }
         }
 
+        var identitiesSnapshot: [any AgeIdentity] = []
+        if !summary.onlyScrypt {
+            switch await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: yubiKeyPIN) {
+            case .ready(let ids):
+                identitiesSnapshot = ids
+            case .needsPIN(let note):
+                yubiKeyPINNote = note
+                showYubiKeyPIN = true
+                return
+            case .cancelled:
+                return
+            case .failed(let message):
+                errorMessage = message
+                return
+            }
+        }
+        yubiKeyPIN = nil
+
         stage = .working
         progressFraction = nil
 
@@ -302,9 +328,6 @@ struct MigrateFlow: View {
         let passphraseSnapshot = passphrase
         let recipientsSnapshot = recipients
         let armorSnapshot = armor
-        let identitiesSnapshot: [any AgeIdentity] = usingPassphrase
-            ? []
-            : vault.identities.compactMap { try? $0.toAgeIdentity() }
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -324,7 +347,7 @@ struct MigrateFlow: View {
                     progressFraction = nil
                 }
             } catch {
-                let description = String(describing: error)
+                let description = (error as? MigrateError)?.errorDescription ?? String(describing: error)
                 DispatchQueue.main.async {
                     errorMessage = description
                     stage = .configure

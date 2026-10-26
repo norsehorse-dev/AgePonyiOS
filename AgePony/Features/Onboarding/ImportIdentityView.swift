@@ -3,10 +3,16 @@
 //  AgePony
 //
 //  Import path used in both onboarding and the Add Identity flow. Three
-//  modes: paste `AGE-SECRET-KEY-1...`, paste an OpenSSH PEM, or pick an
+//  modes: paste an age secret key -- classic `AGE-SECRET-KEY-1...` or
+//  post-quantum `AGE-SECRET-KEY-PQ-1...` -- paste an OpenSSH PEM, or pick an
 //  OpenSSH key file (id_ed25519 / id_rsa) via UIDocumentPicker. The
 //  passphrase prompt is shown inline when the SSH PEM turns out to be
 //  encrypted.
+//
+//  5.0.1 adds YubiKey: paste an age-plugin-yubikey identity (the
+//  `AGE-PLUGIN-YUBIKEY-1…` line, or the whole file it prints). When the file
+//  carries its `# Recipient:` line the key is known at once; otherwise one NFC
+//  tap reads it from the slot the line points at.
 //
 
 import SwiftUI
@@ -22,6 +28,7 @@ struct ImportIdentityView: View {
     @State private var name: String = "Personal"
     @State private var pastedAge: String = ""
     @State private var pastedSSH: String = ""
+    @State private var pastedYubiKey: String = ""
     @State private var passphrase: String = ""
     @State private var showPassphraseField: Bool = false
     @State private var passphraseError: String?
@@ -33,6 +40,7 @@ struct ImportIdentityView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case age   = "age"
         case ssh   = "SSH"
+        case yubikey = "YubiKey"
         var id: String { rawValue }
     }
 
@@ -50,6 +58,7 @@ struct ImportIdentityView: View {
                 Picker("Source", selection: $mode) {
                     Text("age identity").tag(Mode.age)
                     Text("SSH key").tag(Mode.ssh)
+                    Text("YubiKey").tag(Mode.yubikey)
                 }
                 .pickerStyle(.segmented)
             }
@@ -59,6 +68,8 @@ struct ImportIdentityView: View {
                 ageSection
             case .ssh:
                 sshSection
+            case .yubikey:
+                yubiKeySection
             }
 
             Section {
@@ -98,7 +109,7 @@ struct ImportIdentityView: View {
 
     private var ageSection: some View {
         Section {
-            TextField("AGE-SECRET-KEY-1...", text: $pastedAge, axis: .vertical)
+            TextField("AGE-SECRET-KEY-1... or AGE-SECRET-KEY-PQ-1...", text: $pastedAge, axis: .vertical)
                 .font(AgePonyTypography.monoSmall)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -106,7 +117,23 @@ struct ImportIdentityView: View {
         } header: {
             Text("Paste age secret key")
         } footer: {
-            Text("The full string starts with `AGE-SECRET-KEY-1` and is all uppercase.")
+            Text("Starts with `AGE-SECRET-KEY-1`, or `AGE-SECRET-KEY-PQ-1` for a post-quantum key, and is all uppercase. You can paste a whole identity file; the `#` comment lines are ignored.")
+        }
+    }
+
+    // MARK: - YubiKey section
+
+    private var yubiKeySection: some View {
+        Section {
+            TextField("AGE-PLUGIN-YUBIKEY-1...", text: $pastedYubiKey, axis: .vertical)
+                .font(AgePonyTypography.monoSmall)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .lineLimit(3...10)
+        } header: {
+            Text("Paste age-plugin-yubikey identity")
+        } footer: {
+            Text("From `age-plugin-yubikey --identity` on a computer. Paste the whole output if you can: with its Recipient line no tap is needed now. Otherwise you'll hold the YubiKey to your iPhone once so AgePony can read the key. Decrypting needs a tap each time.")
         }
     }
 
@@ -157,6 +184,7 @@ struct ImportIdentityView: View {
         switch mode {
         case .age: return pastedAge.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .ssh: return pastedSSH.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .yubikey: return pastedYubiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
@@ -184,19 +212,42 @@ struct ImportIdentityView: View {
         guard !trimmed.isEmpty else { return }
         saving = true
         passphraseError = nil
+        if mode == .yubikey {
+            Task { await saveYubiKey(trimmed) }
+            return
+        }
         do {
             let stored: StoredIdentity
             switch mode {
+            case .yubikey:
+                saving = false
+                return
             case .age:
-                let raw = pastedAge.trimmingCharacters(in: .whitespacesAndNewlines)
-                let id  = try X25519Identity(ageIdentity: raw)
-                stored = StoredIdentity(
-                    name: trimmed,
-                    type: .x25519,
-                    publicKeyMaterial: id.publicKey,
-                    privateKeyMaterial: id.privateKey,
-                    sshComment: nil
-                )
+                let raw = firstKeyLine(in: pastedAge)
+                // Route on the prefix, as IdentityImport.kt does on Android.
+                // A post-quantum key also begins "AGE-SECRET-KEY-", so the more
+                // specific test has to come first -- checking the classic prefix
+                // first would swallow every PQ key and hand it to a decoder that
+                // can only reject it.
+                if raw.uppercased().hasPrefix("AGE-SECRET-KEY-PQ-") {
+                    let pq = try HybridIdentity(ageIdentity: raw)
+                    stored = StoredIdentity(
+                        name: trimmed,
+                        type: .postQuantum,
+                        publicKeyMaterial: pq.publicKey,
+                        privateKeyMaterial: pq.seed,
+                        sshComment: nil
+                    )
+                } else {
+                    let id = try X25519Identity(ageIdentity: raw)
+                    stored = StoredIdentity(
+                        name: trimmed,
+                        type: .x25519,
+                        publicKeyMaterial: id.publicKey,
+                        privateKeyMaterial: id.privateKey,
+                        sshComment: nil
+                    )
+                }
             case .ssh:
                 let pem = pastedSSH.trimmingCharacters(in: .whitespacesAndNewlines)
                 let pphr = showPassphraseField ? passphrase : nil
@@ -225,9 +276,84 @@ struct ImportIdentityView: View {
         saving = false
     }
 
+    /// Store a YubiKey identity: the stub, and the public key from the pasted
+    /// file or from one NFC tap.
+    @MainActor
+    private func saveYubiKey(_ trimmed: String) async {
+        defer { saving = false }
+        do {
+            let (stub, known) = try YubiKeyStub.parseIdentityFile(pastedYubiKey)
+            let key: Data
+            if let known {
+                key = known
+            } else {
+                key = try await YubiKeyDecrypt.readKey(stub: stub)
+            }
+            if vault.identities.contains(where: { $0.type == .yubikey && $0.publicKeyMaterial == key }) {
+                importError = "This YubiKey key is already in your vault."
+                return
+            }
+            let stored = StoredIdentity(
+                name: trimmed,
+                type: .yubikey,
+                publicKeyMaterial: key,
+                privateKeyMaterial: stub.bytes,
+                sshComment: nil
+            )
+            _ = try vault.addIdentity(stored)
+            onDone()
+        } catch {
+            if YubiKeyDecrypt.isCancelled(error) { return }
+            importError = YubiKeyDecrypt.message(for: error)
+        }
+    }
+
+    /// Accept either a bare key string or the contents of a whole identity
+    /// file. `age-keygen` and AgePony Desktop both write `# created:` and
+    /// `# public key:` lines above the key, and pasting the file wholesale is
+    /// the obvious thing to try.
+    private func firstKeyLine(in text: String) -> String {
+        let payload = text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && !$0.hasPrefix("#") }
+        return payload ?? text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What a Bech32 human-readable part means, in the user's terms.
+    private func describe(hrp: String) -> String {
+        switch hrp.lowercased() {
+        case "age-secret-key-":
+            return "a classic age identity, starting AGE-SECRET-KEY-1"
+        case "age-secret-key-pq-":
+            return "a post-quantum identity, starting AGE-SECRET-KEY-PQ-1"
+        case "age":
+            return "an age recipient (age1…), which is a public key rather than an identity"
+        case "age1pq":
+            return "a post-quantum recipient (age1pq1…), which is a public key rather than an identity"
+        default:
+            return "a “\(hrp)…” string"
+        }
+    }
+
     private func readable(_ error: Error) -> String {
         if let e = error as? Bech32Error {
-            return "That doesn't look like a valid age identity string. (\(e))"
+            switch e {
+            case .unexpectedHRP(let expected, let actual):
+                return "That's \(describe(hrp: actual)). This field needs \(describe(hrp: expected))."
+            case .invalidChecksum:
+                return "The checksum doesn't match. The string is probably truncated or has a typo — check you copied all of it."
+            case .mixedCase:
+                return "An age key is all one case. This string mixes upper and lower case."
+            case .invalidCharacter(let c):
+                return "“\(c)” can't appear in an age key. Check for a stray character picked up while copying."
+            case .invalidPadding:
+                return "That decoded cleanly but is the wrong length for its key type."
+            case .stringTooShort, .missingSeparator, .emptyHRP:
+                return "That doesn't look like an age identity string."
+            default:
+                return "That doesn't look like a valid age identity string. (\(e))"
+            }
         }
         if let e = error as? SSHImportError {
             switch e {

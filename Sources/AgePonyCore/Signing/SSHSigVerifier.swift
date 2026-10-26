@@ -27,16 +27,38 @@ public struct SSHSigVerification: Equatable {
     public let namespace: String
     /// Hash algorithm used for the message digest.
     public let hash: SSHSigHash
+    /// For an `sk-*` signature, the FIDO authenticator-data flags byte; nil otherwise.
+    public let skFlags: UInt8?
 
-    public init(publicKeyWire: Data, keyType: String, namespace: String, hash: SSHSigHash) {
+    public init(publicKeyWire: Data, keyType: String, namespace: String, hash: SSHSigHash, skFlags: UInt8? = nil) {
         self.publicKeyWire = publicKeyWire
         self.keyType = keyType
         self.namespace = namespace
         self.hash = hash
+        self.skFlags = skFlags
     }
+
+    /// For an `sk-*` signature: whether the key saw a touch (UP, flags bit 0). Nil otherwise.
+    public var userPresent: Bool? { skFlags.map { $0 & SSHSigVerifier.skFlagUserPresent != 0 } }
+
+    /// For an `sk-*` signature: whether the key verified the user (UV, flags bit 2: a PIN
+    /// or on-key biometric). Nil otherwise. `verify-required` signers need it.
+    public var userVerified: Bool? { skFlags.map { $0 & SSHSigVerifier.skFlagUserVerified != 0 } }
 }
 
 public enum SSHSigVerifier {
+
+    /// FIDO authenticator-data flags.
+    public static let skFlagUserPresent: UInt8 = 0x01
+    public static let skFlagUserVerified: UInt8 = 0x04
+
+    /// Largest armored signature accepted. A real SSHSIG is a few hundred bytes (about
+    /// 2 KiB for RSA-8192), so this only turns away crafted blobs.
+    public static let maxSignatureBytes = 16 * 1024
+
+    /// OpenSSH's RSA modulus bounds for signers.
+    public static let rsaMinModulusBits = 1024
+    public static let rsaMaxModulusBits = 16384
 
     /// Verify an armored signature over `message`.
     ///
@@ -49,15 +71,21 @@ public enum SSHSigVerifier {
     /// - Returns: details of the (cryptographically valid) signer.
     /// - Throws: `SSHSigError.signatureInvalid` if the math doesn't check out,
     ///   `.namespaceMismatch` if the namespace is wrong, or a parse error.
+    ///
+    /// `allowNoTouch`: an `sk-*` signature made without a touch (UP flag clear) throws
+    /// `.userPresenceRequired` unless this is true, as OpenSSH only accepts one when the
+    /// signer's allowed_signers entry says `no-touch-required` (audit L-7).
     @discardableResult
     public static func verify(
         message: Data,
         armoredSignature: String,
-        expectedNamespace: String? = SSHSig.defaultNamespace
+        expectedNamespace: String? = SSHSig.defaultNamespace,
+        allowNoTouch: Bool = false
     ) throws -> SSHSigVerification {
         try verify(
             armoredSignature: armoredSignature,
             expectedNamespace: expectedNamespace,
+            allowNoTouch: allowNoTouch,
             messageHash: { $0.digest(message) }
         )
     }
@@ -76,8 +104,10 @@ public enum SSHSigVerifier {
     public static func verify(
         armoredSignature: String,
         expectedNamespace: String? = SSHSig.defaultNamespace,
+        allowNoTouch: Bool = false,
         messageHash: (SSHSigHash) throws -> Data
     ) throws -> SSHSigVerification {
+        guard armoredSignature.utf8.count <= maxSignatureBytes else { throw SSHSigError.malformedBlob }
         let blob = try SSHSig.parseArmored(armoredSignature)
 
         if let expected = expectedNamespace, expected != blob.namespace {
@@ -95,6 +125,7 @@ public enum SSHSigVerifier {
             hash: blob.hash
         )
 
+        var skFlags: UInt8?
         switch keyType {
         case "ssh-ed25519":
             guard innerType == "ssh-ed25519" else { throw SSHSigError.malformedInnerSignature }
@@ -107,6 +138,8 @@ public enum SSHSigVerifier {
         case "ssh-rsa":
             guard innerType == "rsa-sha2-512" else { throw SSHSigError.malformedInnerSignature }
             let (e, n) = try SSHSig.rsaComponents(fromWire: blob.publicKeyWire)
+            // Refuse weak or DoS-shaped RSA keys before any modular arithmetic.
+            try checkRSASigner(e: e, n: n)
             let pubKey = try RSAKey.makePublic(n: n, e: e)
             var err: Unmanaged<CFError>?
             let ok = SecKeyVerifySignature(
@@ -139,6 +172,7 @@ public enum SSHSigVerifier {
             guard pubKey.isValidSignature(sig, for: authMsg) else {
                 throw SSHSigError.signatureInvalid
             }
+            skFlags = flags
 
         case "sk-ecdsa-sha2-nistp256@openssh.com":
             let (innerT, sigBlob, flags, counter) = try SSHSig.parseSkInnerSignature(blob.signature)
@@ -155,17 +189,34 @@ public enum SSHSigVerifier {
             guard pubKey.isValidSignature(signature, for: authMsg) else {
                 throw SSHSigError.signatureInvalid
             }
+            skFlags = flags
 
         default:
             throw SSHSigError.unsupportedKeyType(keyType)
+        }
+
+        if let skFlags, skFlags & skFlagUserPresent == 0, !allowNoTouch {
+            throw SSHSigError.userPresenceRequired
         }
 
         return SSHSigVerification(
             publicKeyWire: blob.publicKeyWire,
             keyType: keyType,
             namespace: blob.namespace,
-            hash: blob.hash
+            hash: blob.hash,
+            skFlags: skFlags
         )
+    }
+
+    /// OpenSSH's limits on an RSA signer: 1024 to 16384 bits, odd exponent 3 <= e < 2^32.
+    static func checkRSASigner(e: Data, n: Data) throws {
+        let nb = Array(n.drop(while: { $0 == 0 }))
+        let bits = nb.isEmpty ? 0 : (nb.count - 1) * 8 + (8 - nb[0].leadingZeroBitCount)
+        guard bits >= rsaMinModulusBits, bits <= rsaMaxModulusBits else { throw SSHSigError.unsupportedKeyType("ssh-rsa (\(bits) bits)") }
+        let eb = Array(e.drop(while: { $0 == 0 }))
+        guard !eb.isEmpty, eb.count <= 4, eb.last! & 1 == 1 else { throw SSHSigError.malformedPublicKey }
+        let ev = eb.reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+        guard ev >= 3 else { throw SSHSigError.malformedPublicKey }
     }
 
     /// Verify, and additionally require that the signer is trusted for the
@@ -181,10 +232,12 @@ public enum SSHSigVerifier {
         let result = try verify(
             message: message,
             armoredSignature: armoredSignature,
-            expectedNamespace: expectedNamespace
+            expectedNamespace: expectedNamespace,
+            allowNoTouch: true // the matched entry's options decide below
         )
         guard let match = allowedSigners.first(where: { signer in
             signer.matches(principal: principal, publicKeyWire: result.publicKeyWire)
+                && signer.accepts(result)
         }) else {
             throw SSHSigError.signatureInvalid
         }

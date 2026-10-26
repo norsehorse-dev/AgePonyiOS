@@ -53,6 +53,9 @@ struct RecipientPickerView: View {
         identities: [StoredIdentity],
         savedRecipients: [StoredRecipient],
         initiallySelectedIdentityIDs: Set<UUID>,
+        initiallySelectedRecipientIDs: Set<UUID> = [],
+        initialUseScrypt: Bool = false,
+        initialPassphrase: String = "",
         onConfirm: @escaping (_ recipients: [any AgeRecipient], _ passphrase: String?) -> Void,
         onSaveRecipient: ((StoredRecipient) throws -> Void)? = nil
     ) {
@@ -62,6 +65,10 @@ struct RecipientPickerView: View {
         self.onConfirm = onConfirm
         self.onSaveRecipient = onSaveRecipient
         _selectedIdentityIDs = State(initialValue: initiallySelectedIdentityIDs)
+        _selectedRecipientIDs = State(initialValue: initiallySelectedRecipientIDs)
+        _useScrypt = State(initialValue: initialUseScrypt)
+        _passphrase = State(initialValue: initialPassphrase)
+        _passphraseConfirm = State(initialValue: initialPassphrase)
     }
 
     struct AdHocRecipient: Identifiable {
@@ -229,7 +236,7 @@ struct RecipientPickerView: View {
         } header: {
             Text("Passphrase")
         } footer: {
-            Text("Use a long, random passphrase. There is no recovery if you forget it — scrypt is a brute-force-resistant KDF (work factor 2^18).")
+            Text("Use a long, random passphrase. There is no recovery if you forget it — scrypt is a brute-force-resistant KDF. Its strength is set in Settings.")
         }
     }
 
@@ -386,24 +393,11 @@ struct RecipientPickerView: View {
     // MARK: - Helpers
 
     private func identityTypeLabel(_ t: StoredIdentityType) -> String {
-        switch t {
-        case .x25519:    return "age X25519"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA:    return "SSH RSA"
-        case .secureEnclaveP256: return "Secure Enclave (P-256)"
-        case .skEd25519: return "Security Key (Ed25519)"
-        case .skEcdsaP256: return "Security Key (P-256)"
-        case .postQuantum: return "Post-quantum hybrid"
-        }
+        t.sectionTitle
     }
 
     private func recipientTypeLabel(_ t: StoredRecipientType) -> String {
-        switch t {
-        case .x25519:    return "age X25519"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA:    return "SSH RSA"
-        case .postQuantum: return "Post-quantum hybrid"
-        }
+        t.sectionTitle
     }
 
     private func shorten(_ s: String) -> String {

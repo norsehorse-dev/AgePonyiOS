@@ -1,15 +1,26 @@
-# Xcode / SwiftPM build products
+.DS_Store
 .build/
 .swiftpm/
-DerivedData/
-*.xcuserstate
-
-# Per-user Xcode state, not project configuration
 xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM/
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+AgePony_Security_Audit_*.md
 
-# macOS
-.DS_Store
+# fastlane
+fastlane/raw_screenshots/
+fastlane/derivedData/
+fastlane/README.md
 
-# Scratch space; never publish
-_to_delete/
-_scratch/
+# Env / secrets
+.env
+.env.*
+*.p8
+fastlane/creative_assets/

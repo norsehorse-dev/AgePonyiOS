@@ -65,7 +65,10 @@ struct VerifiedBadge: View {
                 ? "Signed by your identity \"\(name)\". The file hasn't changed since it was signed."
                 : "Signed by \"\(name)\". The file hasn't changed since it was signed."
         case .validUnknownKey:
-            return "The signature is mathematically valid, but the signing key isn't one of your identities or saved recipients. Add it as a recipient to recognize this signer next time."
+            if let name = result.untrustedSignerName {
+                return "The signature is valid and the key is your trusted signer \"\(name)\", but this signature doesn't meet that entry. \(result.untrustedReason ?? "")"
+            }
+            return "The signature is mathematically valid, but the signing key isn't one of your identities or trusted signers. Add it as a trusted signer to recognize this signer next time."
         case .invalid(let reason):
             return reason
         }
@@ -140,12 +143,23 @@ struct CompactVerifiedBadge: View {
                     .font(AgePonyTypography.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+            } else if let name = result.untrustedSignerName {
+                Text("Your trusted signer \"\(name)\" doesn't vouch for this one. \(result.untrustedReason ?? "")")
+                    .font(AgePonyTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             } else if let fingerprint = result.signerFingerprint {
                 Text(fingerprint)
                     .font(AgePonyTypography.monoCaption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+            }
+            if let note = result.note {
+                Text(note)
+                    .font(AgePonyTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
         }
         .padding(.horizontal, 32)

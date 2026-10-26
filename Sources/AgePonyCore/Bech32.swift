@@ -25,6 +25,13 @@ public enum Bech32Error: Error, Equatable {
     case stringTooLong
     case missingSeparator
     case emptyHRP
+    /// The string decoded cleanly but carries the wrong human-readable part --
+    /// e.g. an `age1...` recipient handed to an identity decoder. Distinct from
+    /// `emptyHRP`, which means there was no HRP at all. These were once the same
+    /// case, which surfaced to users as "emptyHRP" for a string whose HRP was
+    /// present and simply not the expected one, sending them hunting for a
+    /// truncated paste when the paste was fine.
+    case unexpectedHRP(expected: String, actual: String)
     case hrpOutOfRange
     case invalidPadding
     case invalidBitGroup
@@ -226,7 +233,7 @@ public extension Bech32 {
     /// Verifies the HRP is `age` and the body is 32 bytes.
     static func decodeAgeRecipient(_ string: String) throws -> [UInt8] {
         let (hrp, bytes) = try decodeBytes(string)
-        guard hrp == "age" else { throw Bech32Error.emptyHRP }
+        guard hrp == "age" else { throw Bech32Error.unexpectedHRP(expected: "age", actual: hrp) }
         guard bytes.count == 32 else { throw Bech32Error.invalidPadding }
         return bytes
     }
@@ -236,7 +243,9 @@ public extension Bech32 {
     static func decodeAgeIdentity(_ string: String) throws -> [UInt8] {
         // decode() normalizes to lowercase HRP, so we compare lowercase.
         let (hrp, bytes) = try decodeBytes(string)
-        guard hrp == "age-secret-key-" else { throw Bech32Error.emptyHRP }
+        guard hrp == "age-secret-key-" else {
+            throw Bech32Error.unexpectedHRP(expected: "age-secret-key-", actual: hrp)
+        }
         guard bytes.count == 32 else { throw Bech32Error.invalidPadding }
         return bytes
     }
@@ -260,7 +269,7 @@ public extension Bech32 {
     /// Decode an `age1pq1...` string into the raw 1216-byte hybrid public key.
     static func decodePostQuantumRecipient(_ string: String) throws -> [UInt8] {
         let (hrp, bytes) = try decodeBytes(string)
-        guard hrp == "age1pq" else { throw Bech32Error.emptyHRP }
+        guard hrp == "age1pq" else { throw Bech32Error.unexpectedHRP(expected: "age1pq", actual: hrp) }
         guard bytes.count == 1216 else { throw Bech32Error.invalidPadding }
         return bytes
     }
@@ -268,8 +277,30 @@ public extension Bech32 {
     /// Decode an `AGE-SECRET-KEY-PQ-1...` string into the raw 32-byte identity seed.
     static func decodePostQuantumIdentity(_ string: String) throws -> [UInt8] {
         let (hrp, bytes) = try decodeBytes(string)
-        guard hrp == "age-secret-key-pq-" else { throw Bech32Error.emptyHRP }
+        guard hrp == "age-secret-key-pq-" else {
+            throw Bech32Error.unexpectedHRP(expected: "age-secret-key-pq-", actual: hrp)
+        }
         guard bytes.count == 32 else { throw Bech32Error.invalidPadding }
+        return bytes
+    }
+
+    // MARK: YubiKey (piv-p256 / age1yubikey1)
+    //
+    // The HRP `age1yubikey` contains a '1'; as with `age1pq`, that is safe
+    // because the Bech32 charset excludes '1', so the separator is the last '1'.
+
+    /// Encode a 33-byte compressed SEC1 P-256 point as an `age1yubikey1...` string.
+    static func encodeYubiKeyRecipient(_ compressedPublicKey: [UInt8]) -> String {
+        encodeBytes(hrp: "age1yubikey", bytes: compressedPublicKey)
+    }
+
+    /// Decode an `age1yubikey1...` string into the raw 33-byte compressed P-256 point.
+    static func decodeYubiKeyRecipient(_ string: String) throws -> [UInt8] {
+        let (hrp, bytes) = try decodeBytes(string)
+        guard hrp == "age1yubikey" else {
+            throw Bech32Error.unexpectedHRP(expected: "age1yubikey", actual: hrp)
+        }
+        guard bytes.count == 33 else { throw Bech32Error.invalidPadding }
         return bytes
     }
 }

@@ -167,6 +167,8 @@ struct NoteDetailView: View {
 
             Section {
                 TextEditor(text: $editingBody)
+                    // No keyboard learning from what's typed here (L-23).
+                    .autocorrectionDisabled()
                     .frame(minHeight: 260)
                     .font(AgePonyTypography.body)
             } header: {

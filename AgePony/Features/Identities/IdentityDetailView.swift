@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import AgePonyCore
 
 struct IdentityDetailView: View {
 
@@ -59,12 +60,28 @@ struct IdentityDetailView: View {
                     Section {
                         AgePonyKeyBlock(
                             label: "Public",
-                            value: identity.publicDisplayString()
+                            value: identity.publicDisplayString(),
+                            showsQR: true
                         )
                     } footer: {
                         Text("Safe to share. Anyone with this string can encrypt to you.")
                     }
 
+                    if identity.type == .yubikey {
+                        Section {
+                            AgePonyKeyBlock(
+                                label: "age-plugin-yubikey identity",
+                                value: identity.privateDisplayString()
+                            )
+                        } footer: {
+                            Text("Not a secret: it only points at the key on your YubiKey (serial \(identity.yubiKeyStub.map { String($0.serial) } ?? "?")). Put it in an identity file to use the same key with age and age-plugin-yubikey on a computer. Decrypting here takes a tap of the YubiKey, and its PIN when the key asks for it.")
+                        }
+                    } else if identity.isHardwareDecryptionKey {
+                        Section {
+                            Label("The private key is inside this iPhone's Secure Enclave. It can't be shown, exported, transferred or backed up, and it's gone if this iPhone is erased or replaced.", systemImage: "cpu")
+                                .font(AgePonyTypography.footnote)
+                        }
+                    } else {
                     Section {
                         if privateRevealed {
                             AgePonyKeyBlock(
@@ -87,6 +104,19 @@ struct IdentityDetailView: View {
                         }
                     } footer: {
                         Text("Revealing the private key requires Face ID, Touch ID, or your device passcode.")
+                    }
+                    }
+
+                    if KeyPortability.isPaperBackable(identity) {
+                        Section {
+                            NavigationLink {
+                                PaperBackupView(vault: vault, identity: identity)
+                            } label: {
+                                Label("Paper backup", systemImage: "printer")
+                            }
+                        } footer: {
+                            Text("A page with this key as a QR code and text, protected with a passphrase, to keep somewhere safe.")
+                        }
                     }
 
                     if vault.activeIdentityID != identity.id {
@@ -163,14 +193,6 @@ struct IdentityDetailView: View {
     }
 
     private func typeLabel(_ t: StoredIdentityType) -> String {
-        switch t {
-        case .x25519:    return "age X25519"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA:    return "SSH RSA"
-        case .secureEnclaveP256: return "Secure Enclave (P-256)"
-        case .skEd25519: return "Security Key (Ed25519)"
-        case .skEcdsaP256: return "Security Key (P-256)"
-        case .postQuantum: return "Post-quantum hybrid"
-        }
+        t.sectionTitle
     }
 }

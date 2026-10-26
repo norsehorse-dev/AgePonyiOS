@@ -4,6 +4,8 @@ import Security
 public enum RSAKeyError: Error {
     case secKeyCreationFailed(String)
     case invalidKeyComponent
+    /// p, q, d and n don't make one key: a raw round trip through the key failed.
+    case inconsistentKey
 }
 
 /// Build `SecKey` objects from raw RSA components. The OpenSSH ssh-rsa private key format
@@ -37,6 +39,12 @@ public enum RSAKey {
         guard !n.isEmpty, !e.isEmpty, !d.isEmpty, !p.isEmpty, !q.isEmpty, !iqmp.isEmpty else {
             throw RSAKeyError.invalidKeyComponent
         }
+        // p and q must be above 1, or p - 1 / q - 1 below would trap (audit L-11).
+        func aboveOne(_ v: Data) -> Bool {
+            let b = Array(v.drop(while: { $0 == 0 }))
+            return b.count > 1 || (b.count == 1 && b[0] > 1)
+        }
+        guard aboveOne(p), aboveOne(q) else { throw RSAKeyError.invalidKeyComponent }
         // exp1 = d mod (p - 1), exp2 = d mod (q - 1)
         let pBI = BigUInt(bigEndianBytes: p)
         let qBI = BigUInt(bigEndianBytes: q)
@@ -69,7 +77,25 @@ public enum RSAKey {
             let msg = (error?.takeRetainedValue()).map { (CFErrorCopyDescription($0) as String) } ?? "unknown"
             throw RSAKeyError.secKeyCreationFailed("private: " + msg)
         }
+        try checkConsistency(privateKey: key, publicKey: try makePublic(n: n, e: e))
         return key
+    }
+
+    /// A raw RSA round trip: encrypt a random block with the public key and decrypt it
+    /// with the private one. Catches a key whose p, q or d don't belong to n and e before
+    /// it's stored or used (Android checks p*q == n and e*d mod lambda; one round trip
+    /// proves the same thing without big-integer multiplication here).
+    static func checkConsistency(privateKey: SecKey, publicKey: SecKey) throws {
+        let size = SecKeyGetBlockSize(publicKey)
+        guard size >= 16, SecKeyGetBlockSize(privateKey) == size else { throw RSAKeyError.inconsistentKey }
+        // Leading 0x00 0x01 keeps the block below n.
+        let block = Data([0x00, 0x01]) + MLKEM768.randomBytes(size - 2)
+        var error: Unmanaged<CFError>?
+        guard let ct = SecKeyCreateEncryptedData(publicKey, .rsaEncryptionRaw, block as CFData, &error) as Data?,
+              let pt = SecKeyCreateDecryptedData(privateKey, .rsaEncryptionRaw, ct as CFData, &error) as Data?,
+              pt.suffix(block.count) == block, pt.prefix(pt.count - block.count).allSatisfy({ $0 == 0 }) else {
+            throw RSAKeyError.inconsistentKey
+        }
     }
 
     /// Exact bit length of a big-endian byte array, ignoring leading zeros.

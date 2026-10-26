@@ -74,7 +74,8 @@ struct RecipientDetailView: View {
                     Section {
                         AgePonyKeyBlock(
                             label: "Public key",
-                            value: recipient.publicDisplayString()
+                            value: recipient.publicDisplayString(),
+                            showsQR: true
                         )
                         if let comment = recipient.sshComment, !comment.isEmpty {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -143,12 +144,7 @@ struct RecipientDetailView: View {
     }
 
     private func typeLabel(_ t: StoredRecipientType) -> String {
-        switch t {
-        case .x25519:    return "age X25519"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA:    return "SSH RSA"
-        case .postQuantum: return "Post-quantum hybrid"
-        }
+        t.sectionTitle
     }
 
     private func sourceLabel(_ s: StoredRecipientSource) -> String {

@@ -55,11 +55,13 @@
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>NFCReaderUsageDescription</key>
-	<string>AgePony uses NFC to communicate with your hardware security key so it can sign files and encrypted data on your device. Your key is never read or stored, and nothing is sent anywhere.</string>
+	<string>AgePony uses NFC to talk to your hardware security key or YubiKey, to sign files and to decrypt files encrypted to the key. The private key stays on the key, and nothing is sent anywhere.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>AgePony uses the camera to scan QR codes containing age recipient strings or SSH public keys, so you can add recipients without typing them out.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>AgePony uses Face ID to unlock your vault of encryption identities and to reveal sensitive private keys.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>AgePony uses the local network to move your keys straight to another phone on the same Wi-Fi when you send or receive keys. Only encrypted data goes across, and nothing is sent to the internet.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -111,6 +113,7 @@
 	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
 	<array>
 		<string>A0000006472F0001</string>
+		<string>A000000308</string>
 	</array>
 </dict>
 </plist>

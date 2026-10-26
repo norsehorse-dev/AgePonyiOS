@@ -13,13 +13,17 @@
 //  SSHSigner.assembleECDSAP256 / SSHSigECDSATests). The Enclave just supplies
 //  the raw r||s; AgePonyCore assembles the signature.
 //
-//  Presence is enforced by the app's existing biometric gate in the sign
-//  flows, consistent with how the SSH signing identities behave. The Enclave
-//  guarantees the private key is non-exportable and hardware-bound regardless.
+//  Presence: keys made from 5.0.1 on carry `.userPresence` in their access
+//  control (audit L-25), so the Enclave itself refuses to sign without Face ID,
+//  Touch ID or the passcode, not only the app's gate in front of it. The sign
+//  flows prompt through BiometricGate first and the Enclave reuses that
+//  context, so it's still one prompt. Keys made before 5.0.1 keep the access
+//  control they were made with; the Enclave can't change it.
 //
 
 import Foundation
 import CryptoKit
+import Security
 import AgePonyCore
 
 public enum SecureEnclaveSignerError: Error, Equatable {
@@ -48,7 +52,13 @@ public enum SecureEnclaveSigner {
     public static func generate() throws -> (privateBlob: Data, publicWire: Data) {
         guard SecureEnclave.isAvailable else { throw SecureEnclaveSignerError.unavailable }
         do {
-            let key = try SecureEnclave.P256.Signing.PrivateKey()
+            guard let access = SecAccessControlCreateWithFlags(
+                kCFAllocatorDefault, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                [.privateKeyUsage, .userPresence], nil
+            ) else {
+                throw SecureEnclaveSignerError.generationFailed("access control")
+            }
+            let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
             let wire = SSHSig.ecdsaP256PublicKeyWire(x963Q: key.publicKey.x963Representation)
             return (key.dataRepresentation, wire)
         } catch {
@@ -86,7 +96,8 @@ public enum SecureEnclaveSigner {
         let key: SecureEnclave.P256.Signing.PrivateKey
         do {
             key = try SecureEnclave.P256.Signing.PrivateKey(
-                dataRepresentation: identity.privateKeyMaterial
+                dataRepresentation: identity.privateKeyMaterial,
+                authenticationContext: BiometricGate.recentContext()
             )
         } catch {
             throw SecureEnclaveSignerError.malformedKeyData

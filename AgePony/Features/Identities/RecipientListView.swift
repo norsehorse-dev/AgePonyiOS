@@ -72,16 +72,14 @@ private struct RecipientRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: iconName)
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
-                .frame(width: 28)
+            KeyAvatarView(seed: recipient.publicKeyMaterial.base64EncodedString(),
+                          name: recipient.name, size: 34)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(recipient.name)
                     .font(AgePonyTypography.bodyEmph)
                 HStack(spacing: 6) {
-                    if recipient.type == .postQuantum {
+                    if recipient.type == .postQuantum || recipient.type == .tagPQ {
                         PostQuantumBadge(compact: true)
                     }
                     Text(sourceLabel)
@@ -101,15 +99,6 @@ private struct RecipientRow: View {
             }
         }
         .padding(.vertical, 4)
-    }
-
-    private var iconName: String {
-        switch recipient.type {
-        case .x25519:    return "person.crop.circle.fill"
-        case .sshEd25519: return "person.crop.circle.badge.checkmark"
-        case .sshRSA:    return "person.crop.circle.badge.checkmark"
-        case .postQuantum: return "atom"
-        }
     }
 
     private var sourceLabel: String {

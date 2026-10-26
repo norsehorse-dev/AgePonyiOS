@@ -25,6 +25,20 @@ import AgePonyCore
 public enum MigrateError: Error, Equatable {
     case noRecipients
     case sameRecipients
+    /// The file carries a v2 signature stanza (5.0.1). That signature covers who
+    /// the file was encrypted to, so it can't survive a change of recipients.
+    case signatureWouldBeLost
+}
+
+extension MigrateError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .noRecipients: return "Choose at least one recipient."
+        case .sameRecipients: return "The file is already encrypted to those recipients."
+        case .signatureWouldBeLost:
+            return "This file is signed, and its signature covers who it was encrypted to, so re-encrypting it would drop the signature. Decrypt it and encrypt it again (signing it yourself if you like) instead."
+        }
+    }
 }
 
 public enum MigrateService {
@@ -61,7 +75,7 @@ public enum MigrateService {
         // re-encrypting the bundle whole carries the signature into the new file
         // still valid -- unwrapping here would silently strip it, and a migration
         // that quietly discards provenance is worse than one that fails.
-        let plaintextURL = try FileEncryptor.decrypt(
+        let decrypted = try FileEncryptor.decrypt(
             inputURL: inputURL,
             identities: identities,
             passphrase: passphrase,
@@ -70,9 +84,16 @@ public enum MigrateService {
                 guard total > 0 else { return }
                 progress?(0.5 * Double(done) / Double(total))
             }
-        ).url
+        )
+        let plaintextURL = decrypted.url
         // Whatever happens next, the decrypted copy does not outlive this call.
         defer { FileEncryptor.cleanupTempFile(at: plaintextURL) }
+
+        // A signature stanza can't be carried across: it covers the old recipients
+        // (5.0.1, audit L-8). Fail rather than quietly drop it, as for a bundle.
+        if case .absent = decrypted.signatureStanza {} else {
+            throw MigrateError.signatureWouldBeLost
+        }
 
         // Step 2: re-encrypt to the new recipients.
         let outURL = try FileEncryptor.encrypt(

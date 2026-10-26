@@ -107,13 +107,17 @@ extension Stanza {
         return s
     }
 
-    /// Base64-decode tolerating optional padding and rejecting whitespace/newlines.
+    /// Strict, canonical unpadded standard base64, as Go age's
+    /// `base64.RawStdEncoding.Strict()`: no `=` padding, no whitespace, and the unused
+    /// trailing bits must be zero. Anything that doesn't re-encode to the same text is
+    /// refused (audit L-1), so a body line can't be altered without changing its bytes.
     internal static func base64Decode(_ s: String) throws -> Data {
-        // Re-pad to a multiple of 4 chars.
-        let needed = (4 - (s.count % 4)) % 4
-        let padded = s + String(repeating: "=", count: needed)
-        // Strict decoding: do NOT accept whitespace or unknown characters.
-        guard let data = Data(base64Encoded: padded, options: []) else {
+        if s.isEmpty { return Data() }
+        guard !s.contains("=") else { throw StanzaError.invalidBase64 }
+        let needed = (4 - (s.utf8.count % 4)) % 4
+        guard needed != 3,
+              let data = Data(base64Encoded: s + String(repeating: "=", count: needed), options: []),
+              base64NoPad(data) == s else {
             throw StanzaError.invalidBase64
         }
         return data
@@ -124,70 +128,45 @@ extension Stanza {
 
 extension Stanza {
 
-    /// Parse a single stanza starting at `lines[index]`.
-    /// Advances `index` past the stanza on success.
+    /// Parse a single stanza starting at `lines[index]`; advances `index` past it.
     ///
-    /// The first line must be `-> TYPE ARG1 ARG2 ...`. Body lines follow until
-    /// the first line of length < 64 (inclusive), or until a line starting with
-    /// `-> ` or `---` (which belongs to the next stanza or the MAC line — that
-    /// line is NOT consumed here).
+    /// Matches filippo.io/age `ReadStanza` (audit L-1): `-> ` then one or more
+    /// single-space-separated arguments, each VCHAR (33...126); then body lines, each
+    /// strict base64. A line of 64 columns (48 bytes) is full and the body continues; the
+    /// first shorter line (possibly empty) ends it and is consumed. A body that runs into
+    /// `-> `, `---` or the end without a short line is refused, as is any line over 64.
     public static func parse(lines: [String], index: inout Int) throws -> Stanza {
-        guard index < lines.count else {
-            throw StanzaError.missingArrow
-        }
+        guard index < lines.count else { throw StanzaError.missingArrow }
         let head = lines[index]
-        guard head.hasPrefix("-> ") else {
-            throw StanzaError.missingArrow
+        guard head.hasPrefix("-> ") else { throw StanzaError.missingArrow }
+        // Split on every single space, like Go's strings.Split: a doubled or trailing
+        // space gives an empty argument, which is refused.
+        let parts = head.dropFirst(3).split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        guard let type = parts.first, !type.isEmpty else { throw StanzaError.argMissingType }
+        for p in parts {
+            if p.isEmpty { throw StanzaError.argEmpty }
+            guard p.unicodeScalars.allSatisfy({ (33...126).contains($0.value) }) else {
+                throw StanzaError.argInvalidCharacter
+            }
         }
         index += 1
 
-        // Split the "-> TYPE ARG1 ARG2 ..." line on single spaces.
-        let after = String(head.dropFirst(3))
-        let parts = after.split(separator: " ", omittingEmptySubsequences: false)
-        guard let typeSub = parts.first, !typeSub.isEmpty else {
-            throw StanzaError.argMissingType
-        }
-        let type = String(typeSub)
-        let args = parts.dropFirst().map(String.init)
-        // Validate args: each must be non-empty (no double-space, no trailing space)
-        // and contain only printable ASCII in [33, 126].
-        for a in args {
-            if a.isEmpty { throw StanzaError.argEmpty }
-            for c in a.unicodeScalars {
-                guard c.value >= 33 && c.value <= 126 else {
-                    throw StanzaError.argInvalidCharacter
-                }
-            }
-        }
-
-        // Read body lines until a "-> " or "---" line (or end of lines).
-        // Per the age v1 spec, the stanza body terminates after the first
-        // line of length strictly less than 64 (which may be empty).
-        var bodyB64 = ""
-        var sawTerminator = false
-        while index < lines.count {
+        var body = Data()
+        while true {
+            guard index < lines.count else { throw StanzaError.bodyLineTooLong }
             let line = lines[index]
-            if line.hasPrefix("-> ") || line.hasPrefix("---") {
-                break
+            guard line.utf8.count <= 64 else { throw StanzaError.bodyLineTooLong }
+            let decoded: Data
+            do {
+                decoded = try base64Decode(line)
+            } catch {
+                if line.hasPrefix("->") || line.hasPrefix("---") { throw StanzaError.bodyLineTooLong }
+                throw StanzaError.invalidBase64
             }
-            // Body line. Length must be ≤ 64.
-            if line.count > 64 {
-                throw StanzaError.bodyLineTooLong
-            }
-            bodyB64.append(line)
+            body.append(decoded)
             index += 1
-            if line.count < 64 {
-                sawTerminator = true
-                break
-            }
+            if decoded.count < 48 { break }
         }
-        if !sawTerminator {
-            // The stanza body must always end with a short line. If we hit
-            // a "-> " / "---" before seeing one, the body is malformed.
-            throw StanzaError.bodyLineTooLong
-        }
-
-        let body = try base64Decode(bodyB64)
-        return Stanza(type: type, args: args, body: body)
+        return Stanza(type: type, args: Array(parts.dropFirst()), body: body)
     }
 }

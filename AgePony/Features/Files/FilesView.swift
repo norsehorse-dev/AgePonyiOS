@@ -27,7 +27,6 @@ struct FilesView: View {
 
     var body: some View {
         VStack(spacing: 24) {
-            Spacer()
             Image(systemName: "lock.doc")
                 .font(.system(size: 64, weight: .light))
                 .foregroundStyle(AgePonyColors.tealCore)
@@ -87,8 +86,11 @@ struct FilesView: View {
                 .buttonStyle(.agePonySecondary)
             }
             .padding(.horizontal, 32)
-            .padding(.bottom, 32)
+
+            Spacer()
         }
+        .padding(.top, 24)
+        .padding(.bottom, 56)
         .sheet(isPresented: $showEncrypt) {
             NavigationStack {
                 EncryptFlow(vault: vault)

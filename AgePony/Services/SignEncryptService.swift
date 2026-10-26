@@ -23,6 +23,14 @@
 //  Reading the old pair still works — see the decrypt path — but nothing produces
 //  one any more.
 //
+//  5.0.1 (plan 1.1, audit L-8): the formats Android 5.0.1 writes. To public-key
+//  recipients the signature rides in an encrypted `agepony.com/sig v2` header
+//  stanza over the plaintext hash and the recipient stanzas, so the output is a
+//  plain age file that `age -d` returns as the original bytes. A passphrase file
+//  can't carry that stanza (scrypt stands alone), so it keeps the bundle, now v2,
+//  whose signature also covers the file name. Both sign SHA-512 under their own
+//  namespace. v1 bundles are still read, never written.
+//
 
 import Foundation
 import AgePonyCore
@@ -71,12 +79,38 @@ public enum SignEncryptService {
         let scoped = inputURL.startAccessingSecurityScopedResource()
         defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
 
-        // Pass 1: hash the plaintext, and sign the digest.
+        // Pass 1: hash the plaintext. Both formats sign SHA-512 of their own message.
+        let payloadSHA512 = try FileSigner.digest(ofFileAt: inputURL, hash: .sha512)
+
+        if passphrase?.isEmpty != false {
+            // Public-key recipients: sig stanza v2. The file key is made and wrapped
+            // first, because the signed message covers the recipient stanzas.
+            let prepared = try SignedEncryption.prepare(to: recipients)
+            let signature = try FileSigner.armoredSignature(
+                messageHash: prepared.messageHash(plaintextSHA512: payloadSHA512),
+                identity: signingIdentity,
+                namespace: SignatureStanza.namespaceV2,
+                hash: .sha512
+            )
+            // Pass 2: read the plaintext again into the encryptor.
+            let outURL = try FileEncryptor.encryptSigned(
+                prepared: prepared,
+                inputURL: inputURL,
+                plaintextSHA512: payloadSHA512,
+                signatureArmored: signature,
+                armor: armor,
+                progress: progress
+            )
+            return Output(encryptedURL: outURL, payloadSize: fileSize(of: inputURL))
+        }
+
+        // Passphrase: signed bundle v2, whose message also covers the file name.
         let armoredSignature = try FileSigner.armoredSignature(
-            messageHash: try FileSigner.digest(ofFileAt: inputURL, hash: hash),
+            messageHash: SignedBundle.v2MessageHash(originalName: inputURL.lastPathComponent,
+                                                    payloadSHA512: payloadSHA512),
             identity: signingIdentity,
-            namespace: namespace,
-            hash: hash
+            namespace: SignedBundle.namespaceV2,
+            hash: .sha512
         )
 
         // Pass 2: stream the plaintext through the bundle and into the encryptor.
@@ -114,13 +148,13 @@ public enum SignEncryptService {
             throw SignEncryptError.cannotOpenInput(originalName)
         }
 
-        let bundle = try SignedBundle.bundleSource(
+        let bundle = try SignedBundle.bundleSourceV2(
             originalName: originalName,
             payloadSize: payloadSize,
             payload: payload,
             signatureArmored: signatureArmored
         )
-        let bundleSize = SignedBundle.sizeOf(
+        let bundleSize = SignedBundle.sizeOfV2(
             originalName: originalName,
             payloadSize: payloadSize,
             signatureArmored: signatureArmored

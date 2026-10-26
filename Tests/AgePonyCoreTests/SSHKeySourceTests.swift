@@ -4,7 +4,7 @@ import XCTest
 final class SSHKeySourceTests: XCTestCase {
     /// A real-looking GitHub `.keys` response with multiple key types.
     static let mixedKeysText = """
-    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPFx4q1cdQYPVPnoYsm0H/jX6vMOgtJ3I7DAuhwJxCt8 friend1@laptop
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILr/NVvNaGxfkVp8Ni/Z3ubM8/k89JoVOg8oMJeid1tU friend1@laptop
     \(RSAKeyTests.testPubLine)
     ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLkA== friend2
     ssh-dss AAAAB3NzaC1kc3MAAAAB= legacy
