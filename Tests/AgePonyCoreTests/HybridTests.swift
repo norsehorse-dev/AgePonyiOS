@@ -15,7 +15,19 @@
 import XCTest
 @testable import AgePonyCore
 
-final class HybridTests: XCTestCase {
+// Not final: HybridOwnCodeTests (CryptoKitBackendTests.swift) runs every test here again
+// with the own code forced, so on macOS 26 both backends are covered (5.1.0 RC3).
+class HybridTests: XCTestCase {
+
+    /// The post-quantum backend this class's tests must run on: CryptoKit on macOS 26 /
+    /// iOS 26, own code before; the OwnCode subclasses override it (RC3 review fix 5).
+    class var expectsCryptoKit: Bool { CryptoKitBackendTests.cryptoKitExpected }
+
+    override func invokeTest() {
+        XCTAssertEqual(HybridKEMBackend.usesCryptoKit, type(of: self).expectsCryptoKit,
+                       "post-quantum backend for \(type(of: self))")
+        super.invokeTest()
+    }
 
     private func hex(_ s: String) -> Data {
         var d = Data(); var i = s.startIndex

@@ -20,7 +20,7 @@ import AgePonyCore
 @available(iOS 16.0, *)
 struct EncryptWithPassphraseIntent: AppIntent {
 
-    static var title: LocalizedStringResource = "Encrypt File with Passphrase"
+    static var title: LocalizedStringResource = "Encrypt file with passphrase"
 
     static var description = IntentDescription(
         "Encrypt a file with a passphrase using age. The result is an .age file that anyone with the passphrase can decrypt.",
@@ -33,7 +33,7 @@ struct EncryptWithPassphraseIntent: AppIntent {
     @Parameter(title: "Passphrase", description: "The passphrase used to encrypt the file.")
     var passphrase: String
 
-    @Parameter(title: "ASCII Armor", description: "Produce a text-safe (PEM-like) .age file instead of binary.", default: false)
+    @Parameter(title: "ASCII armor", description: "Produce a text-safe (PEM-like) .age file instead of binary.", default: false)
     var armor: Bool
 
     static var parameterSummary: some ParameterSummary {
@@ -63,7 +63,7 @@ struct EncryptWithPassphraseIntent: AppIntent {
             )
         } catch {
             throw AgePonyIntentError.operationFailed(
-                (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the file."))
             )
         }
 
@@ -71,7 +71,9 @@ struct EncryptWithPassphraseIntent: AppIntent {
         do {
             outData = try Data(contentsOf: outURL)
         } catch {
-            throw AgePonyIntentError.operationFailed(error.localizedDescription)
+            throw AgePonyIntentError.operationFailed(
+                UserMessage.text(for: error, fallback: String(localized: "Couldn't read the encrypted file."))
+            )
         }
 
         let result = IntentFile(data: outData, filename: outURL.lastPathComponent)

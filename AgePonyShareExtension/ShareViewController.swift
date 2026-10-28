@@ -43,26 +43,8 @@ class ShareViewController: UIViewController {
     // MARK: - UI
 
     private func setupBackground() {
-        let layer = CAGradientLayer()
-        layer.colors = [
-            UIColor(red: 0x38/255, green: 0xCF/255, blue: 0xE8/255, alpha: 1).cgColor,
-            UIColor(red: 0x14/255, green: 0xB8/255, blue: 0xB0/255, alpha: 1).cgColor,
-            UIColor(red: 0x0E/255, green: 0x7D/255, blue: 0x7A/255, alpha: 1).cgColor
-        ]
-        layer.startPoint = CGPoint(x: 0, y: 0)
-        layer.endPoint = CGPoint(x: 1, y: 1)
-        layer.frame = view.bounds
-        view.layer.insertSublayer(layer, at: 0)
-        layer.needsDisplayOnBoundsChange = true
-        layer.actions = ["bounds": NSNull()]
-        gradientLayer = layer
-    }
-
-    private var gradientLayer: CAGradientLayer?
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        gradientLayer?.frame = view.bounds
+        // Plain system background, light or dark with the device.
+        view.backgroundColor = .systemBackground
     }
 
     private func setupSpinner() {
@@ -79,16 +61,16 @@ class ShareViewController: UIViewController {
         ])
 
         let spinner = UIActivityIndicatorView(style: .large)
-        spinner.color = .white
         spinner.startAnimating()
         stack.addArrangedSubview(spinner)
 
         // Renamed from "Opening AgePony…" to avoid confusion with
         // AgePony's own launch screen (which looks visually similar).
         let label = UILabel()
-        label.text = "Preparing share…"
-        label.textColor = .white
-        label.font = .systemFont(ofSize: 17, weight: .medium)
+        label.text = String(localized: "Preparing share…")
+        label.textColor = .label
+        label.font = UIFont.preferredFont(forTextStyle: .body)
+        label.adjustsFontForContentSizeCategory = true
         stack.addArrangedSubview(label)
     }
 
@@ -266,28 +248,33 @@ class ShareViewController: UIViewController {
         case urlConstructionFailed
     }
 
+    /// A plain sentence for the alert. Never the error's own text (5.1.0, U5);
+    /// an unknown system error gets its domain and code for a report.
     private func showError(_ error: Error) {
         let message: String
         if let e = error as? ShareError {
             switch e {
-            case .noInput:               message = "Nothing was shared."
-            case .unsupportedInput:      message = "AgePony can't accept that kind of share."
-            case .urlConstructionFailed: message = "Couldn't construct the AgePony URL."
+            case .noInput:               message = String(localized: "Nothing was shared.")
+            case .unsupportedInput:      message = String(localized: "AgePony can take files and text. This share is neither.")
+            case .urlConstructionFailed: message = String(localized: "Couldn't build the link that opens AgePony.")
             }
         } else if let e = error as? SharedContainerError {
             switch e {
-            case .containerUnavailable:  message = "App Group container is unavailable. Reinstall may be required."
-            case .writeFailed(let m):    message = "Couldn't write the shared payload: \(m)"
-            case .readFailed(let m):     message = "Couldn't read the shared payload: \(m)"
-            case .malformedManifest:     message = "Shared payload is malformed."
-            case .unknownToken:          message = "Shared payload not found."
+            case .containerUnavailable:  message = String(localized: "The folder AgePony shares with this extension isn't available. Reinstalling AgePony may fix it.")
+            case .writeFailed(let m):    message = m
+            case .readFailed(let m):     message = m
+            case .malformedManifest:     message = String(localized: "The shared item is damaged. Share it again.")
+            case .unknownToken:          message = String(localized: "The shared item has expired. Share it again.")
             }
+        } else if type(of: error) is NSError.Type {
+            let ns = error as NSError
+            message = String(localized: "AgePony couldn't take this share (\(ns.domain) \(ns.code)).")
         } else {
-            message = error.localizedDescription
+            message = String(localized: "AgePony couldn't take this share.")
         }
 
-        let alert = UIAlertController(title: "Share failed", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+        let alert = UIAlertController(title: String(localized: "Share failed"), message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { [weak self] _ in
             self?.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
         })
         present(alert, animated: true)

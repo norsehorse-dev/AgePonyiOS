@@ -124,17 +124,19 @@ public struct TagRecipient: LabeledAgeRecipient, Equatable {
 }
 
 /// An identity for a `TagRecipient`. The P-256 half is a `P256KeyAgreement` (a Secure
-/// Enclave key, or software); the ML-KEM half of a hybrid identity is software.
+/// Enclave key, or software); the ML-KEM half of a hybrid identity is an
+/// `MLKEMDecapsulation`: a vault seed in the own code or CryptoKit, or, for keys made on
+/// iOS 26 and later, a Secure Enclave key (5.1.0 RC3, E8).
 ///
-/// `unwrap` checks the tag before any ECDH, so a hardware key only acts for stanzas
-/// addressed to it. Errors from the key agreement itself (a cancelled prompt, say)
+/// `unwrap` checks the tag before any ECDH or decapsulation, so a hardware key only acts
+/// for stanzas addressed to it. Errors from the hardware itself (a cancelled prompt, say)
 /// propagate; a failed AEAD open or a stanza for someone else returns nil.
 public struct TagIdentity: HardwareIdentity {
     public let recipient: TagRecipient
     let p256: P256KeyAgreement
-    let mlkem: MLKEM768.KeyPair?
+    let mlkem: (any MLKEMDecapsulation)?
 
-    init(recipient: TagRecipient, p256: P256KeyAgreement, mlkem: MLKEM768.KeyPair?) {
+    init(recipient: TagRecipient, p256: P256KeyAgreement, mlkem: (any MLKEMDecapsulation)?) {
         self.recipient = recipient
         self.p256 = p256
         self.mlkem = mlkem
@@ -146,12 +148,26 @@ public struct TagIdentity: HardwareIdentity {
         TagIdentity(recipient: try TagRecipient(publicKey: try P256Curve.compressed(publicKey)), p256: p256, mlkem: nil)
     }
 
-    /// A hybrid identity: ML-KEM-768 from `mlkemSeed` (64 bytes, d || z) in software,
-    /// P-256 behind `p256` with public point `p256PublicKey` (any SEC1 encoding).
+    /// A hybrid identity: ML-KEM-768 from `mlkemSeed` (64 bytes, d || z) in software
+    /// (CryptoKit on iOS 26 / macOS 26, own code before), P-256 behind `p256` with public
+    /// point `p256PublicKey` (any SEC1 encoding).
     public static func hybrid(mlkemSeed: Data, p256PublicKey: Data, p256: P256KeyAgreement) throws -> TagIdentity {
-        let kp = try MLKEM768.keyPairFromSeed(mlkemSeed)
-        let recipient = try TagRecipient(publicKey: kp.encapsulationKey + (try P256Curve.uncompressed(p256PublicKey)))
-        return TagIdentity(recipient: recipient, p256: p256, mlkem: kp)
+        try hybrid(mlkem: try HybridKEMBackend.mlkemKey(seed: mlkemSeed), p256PublicKey: p256PublicKey, p256: p256)
+    }
+
+    /// A hybrid identity whose ML-KEM half is `mlkem`, wherever it lives (a Secure
+    /// Enclave key, say), and whose P-256 half is behind `p256` with public point
+    /// `p256PublicKey` (any SEC1 encoding).
+    public static func hybrid(mlkem: any MLKEMDecapsulation, p256PublicKey: Data, p256: P256KeyAgreement) throws -> TagIdentity {
+        let recipient = try TagRecipient(publicKey: mlkem.encapsulationKey + (try P256Curve.uncompressed(p256PublicKey)))
+        return TagIdentity(recipient: recipient, p256: p256, mlkem: mlkem)
+    }
+
+    /// A stand-in that can only tell which stanzas are addressed to `recipient`, from
+    /// public data. It has no private half: `unwrap` never opens anything (a hybrid one
+    /// returns nil; a classic one throws, as `RecordedKeyAgreement` with no results does).
+    public static func probe(recipient: TagRecipient) -> TagIdentity {
+        TagIdentity(recipient: recipient, p256: RecordedKeyAgreement(results: [:]), mlkem: nil)
     }
 
     /// Fully software classic identity (tests, and devices without a Secure Enclave).
@@ -167,16 +183,32 @@ public struct TagIdentity: HardwareIdentity {
         return try hybrid(mlkemSeed: mlkemSeed, p256PublicKey: sw.publicUncompressed, p256: sw)
     }
 
-    public func matches(stanza: Stanza) -> Bool { parse(stanza) != nil }
+    public func matches(stanza: Stanza) -> Bool {
+        #if os(iOS) || os(macOS)
+        // An ML-KEM half that can't be used on this system (RC3 review fix 1) doesn't
+        // claim a stanza, so another hardware key (a YubiKey) is still asked for.
+        if mlkem is UnavailableMLKEM { return false }
+        #endif
+        return parse(stanza) != nil
+    }
 
     public func unwrap(stanza: Stanza) throws -> Data? {
         guard let (enc, body) = parse(stanza) else { return nil }
         let ss: Data
-        if recipient.isHybrid, let mlkem {
-            ss = try HpkeP256.hybridDecap(
-                privateKey: HpkeP256.HybridPrivateKey(mlkem: mlkem, p256: p256, p256PublicUncompressed: recipient.p256Part),
-                enc: enc
-            )
+        if recipient.isHybrid {
+            // A hybrid identity without its ML-KEM half (a probe) can't open anything.
+            // Before 5.1.0 this fell through to the classic DHKEM and threw on the enc length.
+            guard let mlkem else { return nil }
+            do {
+                ss = try HpkeP256.hybridDecap(
+                    privateKey: HpkeP256.HybridPrivateKey(mlkem: mlkem, p256: p256, p256PublicUncompressed: recipient.p256Part),
+                    enc: enc
+                )
+            } catch is MLKEMDecapsulationRefused {
+                // CryptoKit refused a software ML-KEM decapsulation (iOS 26). The own code
+                // would have reached "not for me" here, so: nil. Hardware errors propagate.
+                return nil
+            }
         } else {
             ss = try HpkeP256.dhkemDecap(enc: enc, keyAgreement: p256, recipientPublicKey: recipient.publicKey)
         }

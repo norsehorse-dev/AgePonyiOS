@@ -72,6 +72,7 @@ struct NetworkSettingsView: View {
                 }
             }
         }
+        .textCase(nil)
         .navigationTitle("Network")
         .navigationBarTitleDisplayMode(.inline)
     }

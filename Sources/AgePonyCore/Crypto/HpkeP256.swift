@@ -181,13 +181,14 @@ public enum HpkeP256 {
 
     // MARK: MLKEM768-P256
 
-    /// Hybrid private key material: ML-KEM half in software, P-256 half behind `p256`.
+    /// Hybrid private key material: the ML-KEM half behind `mlkem` (own code, CryptoKit
+    /// or the Secure Enclave; 5.1.0 RC3), the P-256 half behind `p256`.
     public struct HybridPrivateKey {
-        public let mlkem: MLKEM768.KeyPair
+        public let mlkem: any MLKEMDecapsulation
         public let p256: P256KeyAgreement
         public let p256PublicUncompressed: Data
 
-        public init(mlkem: MLKEM768.KeyPair, p256: P256KeyAgreement, p256PublicUncompressed: Data) {
+        public init(mlkem: any MLKEMDecapsulation, p256: P256KeyAgreement, p256PublicUncompressed: Data) {
             precondition(p256PublicUncompressed.count == P256Curve.uncompressedSize)
             self.mlkem = mlkem
             self.p256 = p256
@@ -216,7 +217,7 @@ public enum HpkeP256 {
     public static func hybridFromSeed(_ seed: Data) throws -> HybridPrivateKey {
         let (mlkemSeed, d) = try hybridExpandSeed(seed)
         let sw = try P256SoftwareKey(scalar: d)
-        return HybridPrivateKey(mlkem: try MLKEM768.keyPairFromSeed(mlkemSeed), p256: sw, p256PublicUncompressed: sw.publicUncompressed)
+        return HybridPrivateKey(mlkem: try HybridKEMBackend.mlkemKey(seed: mlkemSeed), p256: sw, p256PublicUncompressed: sw.publicUncompressed)
     }
 
     /// draft-ietf-hpke-pq DeriveKeyPair for MLKEM768-P256: SHAKE256 labeled derive to a
@@ -239,7 +240,9 @@ public enum HpkeP256 {
         let e = try testRandom.map { try P256SoftwareKey(scalar: Data($0.suffix(32))) } ?? P256SoftwareKey.generate()
         let ssT = try e.sharedX(peerUncompressed: pkT.x963Representation)
         let ctT = e.publicUncompressed
-        let (ssPQ, ctPQ) = try MLKEM768.encapsulate(encapsulationKey: ekPQ, message: testRandom.map { Data($0.prefix(32)) })
+        // CryptoKit on iOS 26 / macOS 26 after AgePony's checks, own code otherwise (5.1.0 RC3).
+        let (ssPQ, ctPQ) = try HybridKEMBackend.mlkemEncapsulate(encapsulationKey: ekPQ,
+                                                                message: testRandom.map { Data($0.prefix(32)) })
         return (hybridCombine(ssPQ: ssPQ, ssT: ssT, ctT: ctT, ekT: ekT), ctPQ + ctT)
     }
 
@@ -253,7 +256,7 @@ public enum HpkeP256 {
         let ctPQ = Data(enc.prefix(MLKEM768.ciphertextSize))
         let ctT = Data(enc.suffix(P256Curve.uncompressedSize))
         _ = try P256Curve.decode(ctT)
-        let ssPQ = try MLKEM768.decapsulate(decapsulationKey: privateKey.mlkem.decapsulationKey, ciphertext: ctPQ)
+        let ssPQ = try privateKey.mlkem.decapsulate(ciphertext: ctPQ)
         let ssT = try privateKey.p256.sharedX(peerUncompressed: ctT)
         return hybridCombine(ssPQ: ssPQ, ssT: ssT, ctT: ctT, ekT: privateKey.p256PublicUncompressed)
     }

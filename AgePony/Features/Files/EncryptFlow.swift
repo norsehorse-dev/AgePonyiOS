@@ -40,6 +40,8 @@ struct EncryptFlow: View {
     @State private var resultURL: URL?
     @State private var signEnabled: Bool = false
     @State private var signingIdentityID: UUID?
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     /// Whether the single output carries a signature sealed inside it. There is
     /// no second file to track any more -- 3.0 signs then encrypts.
     @State private var outputIsSigned: Bool = false
@@ -72,11 +74,18 @@ struct EncryptFlow: View {
 
     var body: some View {
         contentForStage
+            .ownerCheck(ownerCheck, vault: vault)
             .navigationTitle("Encrypt a file")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { cleanupAndDismiss() }
+                if stage == .done {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { finishAfterSuccess() }
+                    }
+                } else {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { cleanupAndDismiss() }
+                    }
                 }
             }
             .task {
@@ -108,14 +117,6 @@ struct EncryptFlow: View {
                         onSaveRecipient: { try vault.addRecipient($0) }
                     )
                 }
-            }
-            .alert(
-                "Encrypt failed",
-                isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-            ) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
             }
             .onChange(of: signingAvailable) { _, available in
                 // A signature covers exactly one output. Adding a second file,
@@ -153,12 +154,12 @@ struct EncryptFlow: View {
 
     private var signatureFooter: String {
         if signingIdentities.isEmpty {
-            return "Add an SSH identity (Ed25519 or RSA) to sign. A signature proves the encrypted file came from you and wasn't changed in transit."
+            return String(localized: "Add an SSH identity (Ed25519 or RSA) to sign. A signature proves the encrypted file came from you and wasn't changed in transit.")
         }
         if signEnabled {
-            return "The signature is sealed inside the encrypted file: only someone who can decrypt it sees who signed it. It's still a standard age file, and AgePony on iPhone or Android checks the signature when it decrypts."
+            return String(localized: "The signature is sealed inside the encrypted file: only someone who can decrypt it sees who signed it. It's still a standard age file, and AgePony on iPhone or Android checks the signature when it decrypts.")
         }
-        return "Optionally attach a signature so the recipient can verify the file came from you."
+        return String(localized: "Optionally attach a signature so the recipient can verify the file came from you.")
     }
 
     @ViewBuilder
@@ -178,93 +179,86 @@ struct EncryptFlow: View {
     }
 
     private var pickFileStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "doc.badge.gearshape")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Pick a file to encrypt")
-                .font(AgePonyTypography.title)
-            Text("Any kind of file works. The encrypted result will have a .age extension and can be shared anywhere. Pick several files to bundle them into one .tar.age.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
-            Button("Pick from Files…") { showFilePicker = true }
-                .buttonStyle(.agePonyPrimary)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
+        Form {
+            Section {
+                Button("Choose files…") { showFilePicker = true }
+            } footer: {
+                Text("Any kind of file works. The encrypted copy gets a .age extension and can be shared anywhere. Choose several files to bundle them into one .tar.age or encrypt them one by one.")
+            }
+            errorSection
+        }
+        .textCase(nil)
+    }
+
+    /// The last failure, under the action that caused it.
+    @ViewBuilder
+    private var errorSection: some View {
+        if let errorMessage {
+            Section {
+                StatusText(errorMessage)
+            }
         }
     }
 
     private var chooseModeStage: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 8) {
-                Text("\(inputs.count) files selected")
-                    .font(AgePonyTypography.title)
-                Text(ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file)
-                     + " in total")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
+        Form {
+            Section {
+                LabeledContent("Files") {
+                    Text(inputs.count, format: .number)
+                }
+                LabeledContent("Total size", value: ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file))
             }
-            .padding(.top, 32)
-            .padding(.bottom, 24)
 
-            VStack(spacing: 12) {
-                modeOption(
+            Section {
+                modeRow(
                     .archive,
-                    icon: "shippingbox",
                     title: "One archive",
                     detail: "Bundle everything into a single bundle.tar.age. The recipient unpacks it after decrypting."
                 )
-                modeOption(
+                modeRow(
                     .separate,
-                    icon: "doc.on.doc",
                     title: "One file each",
                     detail: "Encrypt every file on its own, producing \(inputs.count) .age files you can share individually."
                 )
+            } header: {
+                Text("Output")
             }
-            .padding(.horizontal, 20)
 
-            Spacer()
-
-            Button("Continue") { stage = .configure }
-                .buttonStyle(.agePonyPrimary)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
+            Section {
+                Button("Continue") { stage = .configure }
+                    .buttonStyle(.agePonyPrimary)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
         }
+        .textCase(nil)
     }
 
-    private func modeOption(_ mode: MultiMode, icon: String, title: String, detail: String) -> some View {
+    /// One choice in a single-choice list: the title and what it does, with a
+    /// checkmark on the selected row.
+    private func modeRow(_ mode: MultiMode, title: LocalizedStringKey, detail: LocalizedStringKey) -> some View {
         Button {
             multiMode = mode
         } label: {
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: icon)
-                    .font(.system(size: 22))
-                    .foregroundStyle(multiMode == mode ? AgePonyColors.tealCore : .secondary)
-                    .frame(width: 28)
+            HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(AgePonyTypography.bodyEmph)
                         .foregroundStyle(.primary)
                     Text(detail)
-                        .font(AgePonyTypography.caption)
+                        .font(AgePonyTypography.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
                 }
                 Spacer(minLength: 0)
-                Image(systemName: multiMode == mode ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(multiMode == mode ? AgePonyColors.tealCore : .secondary)
+                if multiMode == mode {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(AgePonyColors.accent)
+                }
             }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.secondary.opacity(multiMode == mode ? 0.14 : 0.06))
-            )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(multiMode == mode ? .isSelected : [])
     }
 
     private var configureStage: some View {
@@ -273,20 +267,19 @@ struct EncryptFlow: View {
                 if !inputs.isEmpty {
                     HStack {
                         Image(systemName: inputs.count == 1 ? "doc" : "doc.on.doc")
-                            .foregroundStyle(AgePonyColors.tealCore)
-                        VStack(alignment: .leading, spacing: 2) {
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(sourceTitle)
-                                .font(AgePonyTypography.bodyEmph)
+                                .font(AgePonyTypography.body)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Text(ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file))
-                                .font(AgePonyTypography.caption)
+                                .font(AgePonyTypography.subheadline)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
                         Button("Change") { showFilePicker = true }
-                            .font(AgePonyTypography.footnote)
-                            .foregroundStyle(AgePonyColors.tealCore)
+                            .buttonStyle(.borderless)
                     }
                 }
             } header: {
@@ -298,12 +291,12 @@ struct EncryptFlow: View {
                     showRecipientPicker = true
                 } label: {
                     HStack {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(recipientSummaryTitle)
-                                .font(AgePonyTypography.bodyEmph)
+                                .font(AgePonyTypography.body)
                                 .foregroundStyle(.primary)
                             Text(recipientSummarySubtitle)
-                                .font(AgePonyTypography.caption)
+                                .font(AgePonyTypography.subheadline)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -321,9 +314,11 @@ struct EncryptFlow: View {
             } header: {
                 Text("Format")
             } footer: {
-                Text(armor
-                     ? "Output is text wrapped between BEGIN/END markers — safe to paste into chat, email, or anywhere that mangles binary."
-                     : "Output is binary bytes — smaller, but won't survive being pasted as text.")
+                if armor {
+                    Text("Output is text wrapped between BEGIN and END markers, safe to paste into chat, email, or anywhere that mangles binary.")
+                } else {
+                    Text("Output is binary: smaller, but it won't survive being pasted as text.")
+                }
             }
 
             Section {
@@ -331,13 +326,13 @@ struct EncryptFlow: View {
                     .disabled(signingIdentities.isEmpty || !signingAvailable)
                 if !signingAvailable {
                     Text("A signature covers one file. Choose \"One archive\" to sign the bundle.")
-                        .font(AgePonyTypography.caption)
+                        .font(AgePonyTypography.footnote)
                         .foregroundStyle(.secondary)
                 }
                 if signEnabled, signingAvailable, !signingIdentities.isEmpty {
                     Picker("Sign with", selection: $signingIdentityID) {
                         ForEach(signingIdentities) { identity in
-                            Text(identity.name).tag(Optional(identity.id))
+                            Text(KeyPickerText.menuLine(identity)).tag(Optional(identity.id))
                         }
                     }
                 }
@@ -357,19 +352,21 @@ struct EncryptFlow: View {
                 .listRowBackground(Color.clear)
                 .disabled(!canEncrypt)
             }
+
+            errorSection
         }
+        .textCase(nil)
     }
 
     private var encryptingStage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Spacer()
             if let progressFraction {
                 ProgressView(value: progressFraction)
                     .progressViewStyle(.linear)
-                    .tint(AgePonyColors.tealCore)
                     .padding(.horizontal, 48)
-                Text("\(Int(progressFraction * 100))%")
-                    .font(AgePonyTypography.monoCaption)
+                Text(progressFraction, format: .percent.precision(.fractionLength(0)))
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             } else {
@@ -378,7 +375,6 @@ struct EncryptFlow: View {
                 // the sign-then-encrypt path does not report progress yet.
                 ProgressView()
                     .controlSize(.large)
-                    .tint(AgePonyColors.tealCore)
             }
             Text("Encrypting…")
                 .font(AgePonyTypography.headline)
@@ -388,63 +384,69 @@ struct EncryptFlow: View {
     }
 
     private var doneStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text(batchResults.isEmpty ? "Encrypted" : batchHeadline)
-                .font(AgePonyTypography.title)
+        Form {
+            Section {
+                if batchResults.isEmpty {
+                    StatusText("Encrypted", kind: .success, verdict: true)
+                        .font(AgePonyTypography.headline)
+                } else {
+                    StatusText(batchHeadline, kind: batchSuccessURLs.count == batchResults.count ? .success : .warning, verdict: true)
+                        .font(AgePonyTypography.headline)
+                }
+                if let url = resultURL {
+                    LabeledContent("File") {
+                        Text(url.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            } footer: {
+                if outputIsSigned {
+                    Text("Signed. The signature is sealed inside the file, so the ciphertext doesn't reveal the sender. Whoever decrypts it sees who sent it.")
+                }
+            }
+
             if !batchResults.isEmpty {
-                batchResultList
+                batchResultSection
             }
-            if let url = resultURL {
-                Text(url.lastPathComponent)
-                    .font(AgePonyTypography.monoCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            if outputIsSigned {
-                Text("Signed. The signature is sealed inside the file, so the ciphertext gives nothing away — whoever decrypts it sees who sent it.")
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-            }
-            Spacer()
-            VStack(spacing: 12) {
+
+            Section {
                 if let url = resultURL {
                     ShareLink(item: url) {
                         Text("Share encrypted file")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.agePonyPrimary)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 }
                 if !batchSuccessURLs.isEmpty {
                     ShareLink(items: batchSuccessURLs) {
-                        Text(batchSuccessURLs.count == 1
-                             ? "Share encrypted file"
-                             : "Share \(batchSuccessURLs.count) encrypted files")
-                            .frame(maxWidth: .infinity)
+                        Group {
+                            if batchSuccessURLs.count == 1 {
+                                Text("Share encrypted file")
+                            } else {
+                                Text("Share ^[\(batchSuccessURLs.count) encrypted file](inflect: true)")
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.agePonyPrimary)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 }
-                Button("Encrypt another") {
+            }
+
+            Section {
+                Button("Encrypt another file") {
                     resetForAnother()
                 }
-                .buttonStyle(.agePonySecondary)
-                Button("Done") {
-                    finishAfterSuccess()
-                }
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
         }
+        .textCase(nil)
         .onAppear {
-            // We reached the success screen — count this toward a possible
+            // We reached the success screen: count this toward a possible
             // contextual App Store review prompt later. Counting on appear
             // (rather than on Done) means "Encrypt another" sessions still
             // accrue credit for each file the user actually encrypted.
@@ -463,8 +465,10 @@ struct EncryptFlow: View {
 
     private var batchHeadline: String {
         let ok = batchResults.filter(\.succeeded).count
-        if ok == batchResults.count { return "Encrypted \(ok) files" }
-        return "Encrypted \(ok) of \(batchResults.count)"
+        if ok == batchResults.count {
+            return String(AttributedString(localized: "Encrypted ^[\(ok) file](inflect: true)").characters)
+        }
+        return String(localized: "Encrypted \(ok) of \(batchResults.count)")
     }
 
     private var batchSuccessURLs: [URL] {
@@ -473,33 +477,29 @@ struct EncryptFlow: View {
 
     /// Per-file outcome. A batch reports every file rather than failing whole,
     /// so a single unreadable input does not discard the rest.
-    private var batchResultList: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(batchResults, id: \.source) { result in
-                    HStack(spacing: 8) {
-                        Image(systemName: result.succeeded
-                              ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(result.succeeded ? AgePonyColors.tealCore : .orange)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(result.source.lastPathComponent)
-                                .font(AgePonyTypography.monoCaption)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            if let error = result.error {
-                                Text(describe(error))
-                                    .font(AgePonyTypography.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
+    private var batchResultSection: some View {
+        Section {
+            ForEach(batchResults, id: \.source) { result in
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(result.source.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if let error = result.error {
+                            Text(describe(error))
+                                .font(AgePonyTypography.footnote)
+                                .foregroundStyle(.secondary)
                         }
-                        Spacer(minLength: 0)
                     }
+                } icon: {
+                    Image(systemName: result.succeeded ? "checkmark.circle" : "exclamationmark.triangle")
+                        .foregroundStyle(result.succeeded ? AgePonyColors.success : AgePonyColors.warning)
                 }
             }
-            .padding(.horizontal, 24)
+        } header: {
+            Text("Files")
         }
-        .frame(maxHeight: 220)
     }
 
     private var canEncrypt: Bool {
@@ -508,9 +508,10 @@ struct EncryptFlow: View {
 
     private var sourceTitle: String {
         if inputs.count == 1 { return inputs[0].lastPathComponent }
-        return multiMode == .archive
-            ? "\(inputs.count) files → bundle.tar.age"
-            : "\(inputs.count) files, encrypted separately"
+        if multiMode == .archive {
+            return String(localized: "\(inputs.count) files in bundle.tar.age")
+        }
+        return String(localized: "\(inputs.count) files, encrypted separately")
     }
 
     /// Signing produces one detached signature over one file, so it only makes
@@ -521,23 +522,23 @@ struct EncryptFlow: View {
 
     private var recipientSummaryTitle: String {
         if passphrase?.isEmpty == false {
-            return "Passphrase only"
+            return String(localized: "Passphrase only")
         }
         if recipients.isEmpty {
-            return "Choose recipients"
+            return String(localized: "Choose recipients")
         }
         let n = recipients.count
-        return n == 1 ? "1 recipient" : "\(n) recipients"
+        return String(AttributedString(localized: "^[\(n) recipient](inflect: true)").characters)
     }
 
     private var recipientSummarySubtitle: String {
         if passphrase?.isEmpty == false {
-            return "Encrypted with a passphrase (scrypt)"
+            return String(localized: "Encrypted with a passphrase (scrypt)")
         }
         if recipients.isEmpty {
-            return "Tap to add the people who can decrypt"
+            return String(localized: "Tap to add the people who can decrypt")
         }
-        return "Tap to change"
+        return String(localized: "Tap to change")
     }
 
     private func preloadFile(_ url: URL) {
@@ -564,6 +565,7 @@ struct EncryptFlow: View {
         do {
             let urls = try result.get()
             guard !urls.isEmpty else { return }
+            errorMessage = nil
             if urls.count == 1 {
                 preloadFile(urls[0])
             } else {
@@ -575,7 +577,7 @@ struct EncryptFlow: View {
                 stage = .chooseMode
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't open the files you picked."))
         }
     }
 
@@ -593,6 +595,7 @@ struct EncryptFlow: View {
             return
         }
         guard !inputs.isEmpty else { return }
+        errorMessage = nil
         stage = .encrypting
         working = true
         progressFraction = nil
@@ -677,7 +680,7 @@ struct EncryptFlow: View {
         if vault.biometricEnabled {
             Task {
                 do {
-                    try await BiometricGate.authenticate(reason: "Sign \"\(source.url.lastPathComponent)\" with your private key.")
+                    try await ownerCheck.authenticate(vault, reason: String(localized: "Sign \"\(source.url.lastPathComponent)\" with your private key."))
                     performSignedEncrypt(source: source, identity: identity)
                 } catch BiometricGateError.userCancelled {
                     // Stay on the configure screen -- but the staged archive, if
@@ -685,7 +688,7 @@ struct EncryptFlow: View {
                     discardIfTemporary(source)
                 } catch {
                     discardIfTemporary(source)
-                    errorMessage = error.localizedDescription
+                    errorMessage = UserMessage.text(for: error, fallback: BiometricGate.didNotConfirmText)
                 }
             }
         } else {
@@ -725,6 +728,7 @@ struct EncryptFlow: View {
     }
 
     private func performSignedEncrypt(source: SignableInput, identity: StoredIdentity) {
+        errorMessage = nil
         stage = .encrypting
         working = true
         progressFraction = nil
@@ -808,37 +812,9 @@ struct EncryptFlow: View {
     }
 
     private func describe(_ error: Error) -> String {
-        if let e = error as? FileEncryptorError {
-            switch e {
-            case .noRecipients:                return "No recipients selected."
-            case .scryptCannotMixWithRecipients: return "Passphrase mode can't be combined with other recipients (age spec)."
-            case .readFailed(let m):           return "Couldn't read input: \(m)"
-            case .writeFailed(let m):          return "Couldn't write output: \(m)"
-            case .ageError(let m):             return "Encrypt failed: \(m)"
-            case .cannotOpenInput(let name):   return "Couldn't open \(name) for reading."
-            case .cannotOpenOutput(let name):  return "Couldn't create \(name)."
-            case .scryptWontFit(let reason):   return reason
-            case .bundleDamaged(let m):        return "The signed bundle is damaged: \(m)"
-            }
+        if let e = error as? SignEncryptError, case .requiresSecurityKey = e {
+            return String(localized: "That identity signs with a security key, which Encrypt a file can't use yet. Sign the file from Sign a file instead.")
         }
-        if let e = error as? FileSignerError {
-            switch e {
-            case .identityCannotSign:        return "That identity can't sign."
-            case .keyTypeNotYetSupported:    return "That key type can't sign yet."
-            case .malformedIdentityMaterial: return "The signing key looks malformed."
-            case .readFailed(let m):         return "Couldn't read the file to sign: \(m)"
-            case .writeFailed(let m):        return "Couldn't write the signature: \(m)"
-            case .signError(let m):          return "Signing failed: \(m)"
-            case .requiresSecurityKey:       return "This identity signs with your security key."
-            }
-        }
-        if let e = error as? SignEncryptError {
-            switch e {
-            case .signingIdentityCannotSign: return "The chosen identity can't sign."
-            case .requiresSecurityKey:       return "That identity signs with your security key, which sign-and-encrypt doesn't offer yet."
-            case .cannotOpenInput(let name): return "Couldn't open \(name) for reading."
-            }
-        }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the file."))
     }
 }

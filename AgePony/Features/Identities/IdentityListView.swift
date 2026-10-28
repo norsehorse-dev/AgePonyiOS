@@ -13,24 +13,20 @@ import SwiftUI
 struct IdentityListView: View {
 
     let vault: Vault
+    /// Opens Add identity (the empty state's action).
+    var onAdd: () -> Void = {}
 
     @State private var pendingDelete: StoredIdentity?
 
     var body: some View {
         if vault.identities.isEmpty {
-            VStack(spacing: 14) {
-                Spacer()
-                Image(systemName: "key.slash")
-                    .font(.system(size: 44, weight: .light))
-                    .foregroundStyle(.secondary)
-                Text("No identities yet")
-                    .font(AgePonyTypography.headline)
-                Text("Tap + to add one.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
-                Spacer()
+            ContentUnavailableView {
+                Label("No identities", systemImage: "key")
+            } description: {
+                Text("An identity is your private key. Files encrypted to its public key can only be opened with it. Create a new one or import one you already have.")
+            } actions: {
+                Button("Add identity", action: onAdd)
             }
-            .frame(maxWidth: .infinity)
         } else {
             List {
                 ForEach(groupedSections, id: \.title) { section in
@@ -50,12 +46,13 @@ struct IdentityListView: View {
                     }
                 }
             }
+            .textCase(nil)
             .listStyle(.insetGrouped)
             .navigationDestination(for: StoredIdentity.self) { id in
                 IdentityDetailView(vault: vault, identityID: id.id)
             }
             .confirmationDialog(
-                pendingDelete.map { "Delete \"\($0.name)\"?" } ?? "",
+                pendingDelete.map { String(localized: "Delete \"\($0.name)\"?") } ?? "",
                 isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                 titleVisibility: .visible
             ) {
@@ -95,24 +92,21 @@ private struct IdentityRow: View {
     var body: some View {
         HStack(spacing: 12) {
             KeyAvatarView(seed: identity.publicKeyMaterial.base64EncodedString(),
-                          name: identity.name, size: 34)
+                          name: identity.name, size: 36)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(identity.name)
-                        .font(AgePonyTypography.bodyEmph)
-                    if identity.type == .postQuantum || identity.type == .secureEnclaveTagPQ {
-                        PostQuantumBadge(compact: true)
-                    }
-                    if isActive {
-                        Text("ACTIVE")
-                            .font(.system(size: 9, weight: .semibold, design: .default))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                Capsule().fill(AgePonyColors.tealCore)
-                            )
+            VStack(alignment: .leading, spacing: 4) {
+                Text(identity.name)
+                    .font(AgePonyTypography.body)
+                if isActive || identity.type == .postQuantum || identity.type == .secureEnclaveTagPQ {
+                    HStack(spacing: 8) {
+                        if isActive {
+                            Text("Active")
+                                .font(AgePonyTypography.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        if identity.type == .postQuantum || identity.type == .secureEnclaveTagPQ {
+                            PostQuantumBadge(compact: true)
+                        }
                     }
                 }
                 Text(shortFingerprint)

@@ -24,3 +24,4 @@ fastlane/README.md
 .env.*
 *.p8
 fastlane/creative_assets/
+fastlane/metadata_live/

@@ -48,14 +48,14 @@ public enum FileSigner {
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 
         guard let stream = InputStream(url: url) else {
-            throw FileSignerError.readFailed(url.lastPathComponent)
+            throw FileSignerError.readFailed(String(localized: "Couldn't open \(url.lastPathComponent)."))
         }
         stream.open()
         defer { stream.close() }
         do {
             return try hash.digest(streaming: stream)
         } catch {
-            throw FileSignerError.readFailed(error.localizedDescription)
+            throw FileSignerError.readFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't read \(url.lastPathComponent).")))
         }
     }
 
@@ -91,7 +91,7 @@ public enum FileSigner {
                     hash: hash
                 )
             } catch {
-                throw FileSignerError.signError(String(describing: error))
+                throw FileSignerError.signError(UserMessage.text(for: error, fallback: String(localized: "Couldn't make the signature.")))
             }
 
         case .sshRSA:
@@ -108,7 +108,7 @@ public enum FileSigner {
                     hash: hash
                 )
             } catch {
-                throw FileSignerError.signError(String(describing: error))
+                throw FileSignerError.signError(UserMessage.text(for: error, fallback: String(localized: "Couldn't make the signature.")))
             }
 
         case .secureEnclaveP256:
@@ -120,7 +120,7 @@ public enum FileSigner {
                     hash: hash
                 )
             } catch {
-                throw FileSignerError.signError(String(describing: error))
+                throw FileSignerError.signError(UserMessage.text(for: error, fallback: String(localized: "Couldn't make the signature.")))
             }
 
         case .skEd25519, .skEcdsaP256:
@@ -219,8 +219,10 @@ public enum FileSigner {
             // Surface the PIN signal untouched so the UI can prompt and retry.
             throw e
         } catch {
+            // A closed NFC sheet stays a cancellation, so the screen shows nothing.
+            if UserMessage.isCancellation(error) { throw error }
             throw FileSignerError.signError(
-                (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                UserMessage.text(for: error, fallback: String(localized: "The security key couldn't make the signature."))
             )
         }
     }
@@ -262,13 +264,13 @@ public enum FileSigner {
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            throw FileSignerError.writeFailed(error.localizedDescription)
+            throw FileSignerError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't make a temporary folder for the signature.")))
         }
         let url = dir.appendingPathComponent(name)
         do {
             try bytes.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
         } catch {
-            throw FileSignerError.writeFailed(error.localizedDescription)
+            throw FileSignerError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't write the signature file.")))
         }
         return url
     }

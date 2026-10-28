@@ -6,12 +6,12 @@
 //    • In-app biometric prompts on/off. This only drives whether AgePony
 //      shows its OWN auth prompts for in-app reveals; how the vault locks is
 //      LockSettingsView's job, and this toggle never changes it (L-25).
-//    • Encrypt-to-self default — auto-add the active identity's recipient
+//    • Encrypt-to-self default: auto-add the active identity's recipient
 //      when encrypting from the Files / Notes / Text tabs.
-//    • Active identity — which identity is the default "encrypt-to-self"
+//    • Active identity: which identity is the default "encrypt-to-self"
 //      recipient and the default decrypt attempt order.
-//    • About — version, age-spec link, NorseHorse credit.
-//    • Reset App — destroy the vault. Guarded by a confirmation dialog.
+//    • About: version, age-spec link, NorseHorse credit.
+//    • Reset App: destroy the vault. Guarded by a confirmation dialog.
 //
 
 import SwiftUI
@@ -29,6 +29,8 @@ struct SettingsView: View {
     @State private var backupRecipientID: UUID?
 
     @State private var pendingReset: Bool = false
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     @State private var resetError: String?
     @State private var showWalkthrough: Bool = false
     @AppStorage(AppTheme.storageKey) private var themeRaw: String = AppTheme.system.rawValue
@@ -61,6 +63,8 @@ struct SettingsView: View {
             dataSection
             dangerZoneSection
         }
+        .textCase(nil)
+        .ownerCheck(ownerCheck, vault: vault)
         .fullScreenCover(isPresented: $showWalkthrough) {
             WalkthroughView {
                 showWalkthrough = false
@@ -99,7 +103,11 @@ struct SettingsView: View {
             } label: {
                 Label("Network", systemImage: "network")
             }
-            if BiometricGate.availableBiometric() == .none {
+            if BiometricGate.availableBiometric() == .none && vault.lockMode == .biometricOnly {
+                Text("\(BiometricGate.biometryName()) isn't available right now. AgePony asks for your app password instead, never the device passcode.")
+                    .font(AgePonyTypography.footnote)
+                    .foregroundStyle(.secondary)
+            } else if BiometricGate.availableBiometric() == .none {
                 Text("This device doesn't support biometric authentication. AgePony will use your device passcode.")
                     .font(AgePonyTypography.footnote)
                     .foregroundStyle(.secondary)
@@ -113,7 +121,7 @@ struct SettingsView: View {
                         // Turning prompts off weakens the app: confirm it's the owner (L-15).
                         Task {
                             do {
-                                try await BiometricGate.authenticate(reason: "Confirm it's you to turn off in-app prompts")
+                                try await ownerCheck.authenticate(vault, reason: String(localized: "Confirm it's you to turn off in-app prompts"))
                                 vault.biometricEnabled = false
                             } catch BiometricGateError.unavailable {
                                 vault.biometricEnabled = false
@@ -137,7 +145,7 @@ struct SettingsView: View {
             Picker("Also encrypt to", selection: $backupRecipientID) {
                 Text("No one").tag(UUID?.none)
                 ForEach(vault.recipients) { r in
-                    Text(r.name).tag(Optional(r.id))
+                    Text(KeyPickerText.menuLine(r)).tag(Optional(r.id))
                 }
             }
             .pickerStyle(.menu)
@@ -152,7 +160,7 @@ struct SettingsView: View {
                 }
             }
             Text(scryptFootnote)
-                .font(AgePonyTypography.caption)
+                .font(AgePonyTypography.footnote)
                 .foregroundStyle(.secondary)
                 .onChange(of: scryptWorkFactor) { _, new in
                     vault.scryptWorkFactor = new
@@ -176,7 +184,7 @@ struct SettingsView: View {
             } else {
                 Picker("Active identity", selection: $activeIdentityID) {
                     ForEach(vault.identities) { id in
-                        Text(id.name).tag(Optional(id.id))
+                        Text(KeyPickerText.menuLine(id)).tag(Optional(id.id))
                     }
                 }
                 .pickerStyle(.menu)
@@ -230,7 +238,7 @@ struct SettingsView: View {
                     Text("Trusted signers")
                     Spacer()
                     if !vault.signers.isEmpty {
-                        Text("\(vault.signers.count)")
+                        Text(vault.signers.count, format: .number)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -289,7 +297,7 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             }
         } header: {
-            Text("Help & Support")
+            Text("Help and support")
         } footer: {
             Text("Replay the feature tour, rate AgePony on the App Store, or email feedback straight to NorseHorse.")
         }
@@ -339,7 +347,7 @@ struct SettingsView: View {
                 Label("Reset AgePony", systemImage: "exclamationmark.triangle")
             }
         } header: {
-            Text("Danger zone")
+            Text("Reset")
         } footer: {
             Text("Erases all stored identities, recipients, and notes. Files outside AgePony are untouched.")
         }
@@ -404,9 +412,11 @@ struct SettingsView: View {
         .alert("Temporary files cleared", isPresented: $showTempCleared) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(tempFreedBytes > 0
-                 ? "Freed \(ByteCountFormatter.string(fromByteCount: tempFreedBytes, countStyle: .file))."
-                 : "There was nothing to clear.")
+            if tempFreedBytes > 0 {
+                Text("Freed \(ByteCountFormatter.string(fromByteCount: tempFreedBytes, countStyle: .file)).")
+            } else {
+                Text("There was nothing to clear.")
+            }
         }
     }
 
@@ -414,26 +424,26 @@ struct SettingsView: View {
 
     private var moreFromNorseHorseSection: some View {
         Section {
-            appLink("PGPony", "OpenPGP encryption and signing", "envelope.fill", .indigo,
+            appLink(Text(verbatim: "PGPony"), "OpenPGP encryption and signing", "envelope.fill",
                     "https://apps.apple.com/us/app/pgpony/id6759994432")
-            appLink("QuorumPony", "Quorum key backup and recovery", "person.3.fill", .teal,
+            appLink(Text(verbatim: "QuorumPony"), "Quorum key backup and recovery", "person.3.fill",
                     "https://apps.apple.com/us/app/quorumpony-key-backup/id6783608628")
-            appLink("CarrierPony", "PGP chat and encrypted files", "bubble.left.and.bubble.right.fill", .green,
+            appLink(Text(verbatim: "CarrierPony"), "PGP chat and encrypted files", "bubble.left.and.bubble.right.fill",
                     "https://apps.apple.com/us/app/carrierpony-pgp-chat-files/id6786930072")
-            appLink("BurnPony", "Self-destructing encrypted messages", "flame.fill", .orange,
+            appLink(Text(verbatim: "BurnPony"), "Self-destructing encrypted messages", "flame.fill",
                     "https://apps.apple.com/us/app/burnpony/id6788513233")
-            appLink("RelayPony", "Encrypted file transfer", "paperplane.fill", .blue,
+            appLink(Text(verbatim: "RelayPony"), "Encrypted file transfer", "paperplane.fill",
                     "https://apps.apple.com/us/app/relaypony-file-transfer/id6785085525")
-            appLink("ScrubPony", "Strip metadata from your files", "eraser.fill", .pink,
+            appLink(Text(verbatim: "ScrubPony"), "Strip metadata from your files", "eraser.fill",
                     "https://scrubpony.app")
-            appLink("VaultPony", "Encrypted vault for your files", "lock.rectangle.stack.fill", .brown,
+            appLink(Text(verbatim: "VaultPony"), "Encrypted vault for your files", "lock.rectangle.stack.fill",
                     "https://vaultpony.app")
-            appLink("PassPony", "Password manager", "key.fill", .yellow,
+            appLink(Text(verbatim: "PassPony"), "Password manager", "key.fill",
                     "https://passpony.app")
-            appLink("See the full pony family", "Every NorseHorse app in one place", "square.grid.2x2.fill", .indigo,
+            appLink(Text("See the full pony family"), "Every NorseHorse app in one place", "square.grid.2x2.fill",
                     "https://pony.norsehor.se")
-            appLink("Source code on GitHub", "AgePony is fully open source (Apache-2.0). Inspect all of it.",
-                    "chevron.left.forwardslash.chevron.right", .primary,
+            appLink(Text("Source code on GitHub"), "AgePony is open source under the Apache-2.0 license.",
+                    "chevron.left.forwardslash.chevron.right",
                     "https://github.com/norsehorse-dev/AgePonyiOS")
         } header: {
             Text("More from NorseHorse")
@@ -442,16 +452,16 @@ struct SettingsView: View {
         }
     }
 
-    private func appLink(_ name: String, _ subtitle: String, _ systemImage: String,
-                         _ color: Color, _ urlString: String) -> some View {
+    private func appLink(_ name: Text, _ subtitle: LocalizedStringKey, _ systemImage: String,
+                         _ urlString: String) -> some View {
         Link(destination: URL(string: urlString)!) {
             Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name).foregroundStyle(.primary)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    name.foregroundStyle(.primary)
+                    Text(subtitle).font(AgePonyTypography.subheadline).foregroundStyle(.secondary)
                 }
             } icon: {
-                Image(systemName: systemImage).foregroundStyle(color)
+                Image(systemName: systemImage).foregroundStyle(.secondary)
             }
         }
     }
@@ -462,15 +472,12 @@ struct SettingsView: View {
     /// memory. Also warns when the current choice will not fit right now, since
     /// the encrypt would otherwise fail only when attempted.
     private var scryptFootnote: String {
-        var text = "Passphrase encryption deliberately costs memory to resist guessing. "
-        text += "Higher is stronger and slower; "
-        text += ScryptMemory.describe(workFactor: scryptWorkFactor)
-        text += " is what each passphrase file will cost to open, on any device. "
-        text += "This is unrelated to file size."
+        let cost = ScryptMemory.describe(workFactor: scryptWorkFactor)
+        var sentences = [String(localized: "Passphrase encryption deliberately costs memory to resist guessing. Higher is stronger and slower. \(cost) is what each passphrase file will cost to open, on any device. This is unrelated to file size.")]
         if !ScryptMemory.fits(workFactor: scryptWorkFactor) {
-            text += " This device may not have enough free memory for that right now."
+            sentences.append(String(localized: "This device may not have enough free memory for that right now."))
         }
-        return text
+        return sentences.joined(separator: " ")
     }
 
     private var biometricLabel: String {
@@ -478,7 +485,7 @@ struct SettingsView: View {
         case .faceID:  return "Face ID"
         case .touchID: return "Touch ID"
         case .opticID: return "Optic ID"
-        case .none:    return "your passcode"
+        case .none:    return String(localized: "your passcode")
         }
     }
 
@@ -500,7 +507,7 @@ struct SettingsView: View {
         do {
             try vault.reset()
         } catch {
-            resetError = error.localizedDescription
+            resetError = UserMessage.text(for: error, fallback: String(localized: "Couldn't reset the vault."))
         }
     }
 }

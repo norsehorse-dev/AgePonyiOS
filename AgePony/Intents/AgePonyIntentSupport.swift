@@ -19,9 +19,9 @@ enum AgePonyIntentError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyPassphrase:
-            return "Enter a passphrase to encrypt with."
+            return String(localized: "Enter a passphrase to encrypt with.")
         case .couldNotReadInput:
-            return "Couldn't read the input file."
+            return String(localized: "Couldn't read the input file.")
         case .operationFailed(let message):
             return message
         }

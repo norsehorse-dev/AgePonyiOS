@@ -10,6 +10,7 @@
 
 import Testing
 import Foundation
+import CryptoKit
 import AgePonyCore
 @testable import AgePony
 
@@ -152,6 +153,61 @@ struct KeyPortabilityTests {
         #expect(PaperBackupView.passphraseWeakness("apple-banana-cherry") != nil)
         #expect(PaperBackupView.passphraseWeakness("apple-banana-cherry-dates-elder-figs") == nil)
         #expect(PaperBackupView.passphraseWeakness("x7#Kq9!mW2$vL4") == nil)
+    }
+
+    // MARK: YubiKey PIN policy (5.1.0 item 1)
+
+    private func yubiKey(pinPolicy: YubiKeyPINPolicy?) throws -> StoredIdentity {
+        let pub = P256.KeyAgreement.PrivateKey().publicKey.compressedRepresentation
+        let stub = try YubiKeyStub(serial: 12_345_678, slot: 0x82, tag: YubiKeyStub.staticTag(compressedPublicKey: pub))
+        return StoredIdentity(name: "yubikey", type: .yubikey, publicKeyMaterial: pub,
+                              privateKeyMaterial: stub.bytes, pinPolicy: pinPolicy)
+    }
+
+    @Test func yubiKeyPINPolicy_travelsInAgeponyJSON() throws {
+        for policy in [YubiKeyPINPolicy.required, .notRequired] {
+            let wire = try #require(KeyPortability.wire(try yubiKey(pinPolicy: policy)))
+            #expect(wire.type == "yubikeyPiv")
+            #expect(wire.pinPolicy == policy.rawValue)
+            let back = try #require(KeyPortability.storedIdentity(wire))
+            #expect(back.pinPolicy == policy)
+            #expect(KeyPortability.isConsistent(back))
+        }
+
+        // Unknown is left out, and a missing value reads back as unknown.
+        let unknownWire = try #require(KeyPortability.wire(try yubiKey(pinPolicy: nil)))
+        #expect(unknownWire.pinPolicy == nil)
+        let unknownBack = try #require(KeyPortability.storedIdentity(unknownWire))
+        #expect(unknownBack.yubiKeyPINPolicy == .unknown)
+
+        // A value from a newer version is ignored rather than dropping the key.
+        var newer = unknownWire
+        newer.pinPolicy = "sometimes"
+        let newerBack = try #require(KeyPortability.storedIdentity(newer))
+        #expect(newerBack.yubiKeyPINPolicy == .unknown)
+
+        // Other key types never carry it.
+        let x = try #require(KeyPortability.wire(x25519()))
+        #expect(x.pinPolicy == nil)
+    }
+
+    @Test func yubiKeyPINPolicy_vaultRecordDecoding() throws {
+        let original = try yubiKey(pinPolicy: .notRequired)
+        let data = try JSONEncoder().encode(original)
+        let back = try JSONDecoder().decode(StoredIdentity.self, from: data)
+        #expect(back.pinPolicy == .notRequired)
+
+        // A record written by 5.0.1 has no pinPolicy key: it decodes, as unknown.
+        var object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object["pinPolicy"] = nil
+        let old = try JSONDecoder().decode(StoredIdentity.self, from: try JSONSerialization.data(withJSONObject: object))
+        #expect(old.pinPolicy == nil)
+        #expect(old.yubiKeyPINPolicy == .unknown)
+
+        // A value written by a newer version reads as unknown instead of failing the vault.
+        object["pinPolicy"] = "sometimes"
+        let newer = try JSONDecoder().decode(StoredIdentity.self, from: try JSONSerialization.data(withJSONObject: object))
+        #expect(newer.yubiKeyPINPolicy == .unknown)
     }
 
     @Test func localNetwork_privateRanges() {

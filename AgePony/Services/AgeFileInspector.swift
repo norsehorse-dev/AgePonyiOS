@@ -108,16 +108,16 @@ public struct StanzaSummary: Equatable, Identifiable {
 
         public var displayLabel: String {
             switch self {
-            case .x25519:      return "age X25519 recipient"
-            case .sshEd25519:  return "SSH Ed25519 recipient"
-            case .sshRSA:      return "SSH RSA recipient"
-            case .scrypt:      return "Passphrase (scrypt)"
-            case .postQuantum: return "Post-quantum recipient"
-            case .yubikey:     return "YubiKey (piv-p256) recipient"
-            case .tag:         return "Hardware key (age1tag) recipient"
-            case .tagPQ:       return "Quantum-safe hardware key (age1tagpq) recipient"
-            case .signature:   return "AgePony signature (encrypted): only a recipient can see who signed"
-            case .unknown:     return "Unknown recipient type"
+            case .x25519:      return String(localized: "age X25519 recipient")
+            case .sshEd25519:  return String(localized: "SSH Ed25519 recipient")
+            case .sshRSA:      return String(localized: "SSH RSA recipient")
+            case .scrypt:      return String(localized: "Passphrase (scrypt)")
+            case .postQuantum: return String(localized: "Post-quantum recipient")
+            case .yubikey:     return String(localized: "YubiKey (piv-p256) recipient")
+            case .tag:         return String(localized: "Hardware key (age1tag) recipient")
+            case .tagPQ:       return String(localized: "Quantum-safe hardware key (age1tagpq) recipient")
+            case .signature:   return String(localized: "AgePony signature (encrypted): only a recipient can see who signed")
+            case .unknown:     return String(localized: "Unknown recipient type")
             }
         }
     }
@@ -253,17 +253,10 @@ public enum AgeFileInspector {
         return AgeArmor.looksArmored(prefix: Data(buffer[0..<n]))
     }
 
+    /// The payload is a finished sentence from `UserMessage`, never the
+    /// error's own text (5.1.0, U5).
     private static func mapHeaderError(_ error: Error) -> AgeFileInspectorError {
-        if let e = error as? AgeError {
-            switch e {
-            case .headerError(let h): return .headerParseFailed(String(describing: h))
-            default:                  return .headerParseFailed(String(describing: e))
-            }
-        }
-        if let e = error as? AgeHeaderError {
-            return .headerParseFailed(String(describing: e))
-        }
-        return .headerParseFailed(error.localizedDescription)
+        .headerParseFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't read the file's age header.")))
     }
 
     private static func summarize(

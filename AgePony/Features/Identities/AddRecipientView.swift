@@ -63,6 +63,7 @@ struct AddRecipientView: View {
                 saveSection
             }
         }
+        .textCase(nil)
         .navigationTitle("Add recipient")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -117,25 +118,23 @@ struct AddRecipientView: View {
 
     private var pasteInputSection: some View {
         Section {
-            TextField("age1... or ssh-ed25519 / ssh-rsa AAAA...", text: $pasteText, axis: .vertical)
-                .font(AgePonyTypography.monoCaption)
+            TextField("An age1… recipient or an ssh-ed25519 or ssh-rsa key", text: $pasteText, axis: .vertical)
+                // Mono for the key itself, not for the prompt.
+                .font(pasteText.isEmpty ? AgePonyTypography.body : AgePonyTypography.monoCaption)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .lineLimit(2...8)
 
             if let msg = pasteError {
-                Text(msg)
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(AgePonyColors.destructive)
+                StatusText(msg)
+                    .font(AgePonyTypography.footnote)
             }
 
             Button {
                 parsePaste()
             } label: {
-                Label("Parse", systemImage: "checkmark.circle")
-                    .font(AgePonyTypography.footnote)
+                Label("Check key", systemImage: "checkmark.circle")
             }
-            .foregroundStyle(AgePonyColors.tealCore)
             .disabled(pasteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } header: {
             Text("Paste a public key")
@@ -151,19 +150,16 @@ struct AddRecipientView: View {
                 showScanner = true
             } label: {
                 Label("Open camera and scan", systemImage: "qrcode.viewfinder")
-                    .font(AgePonyTypography.body)
             }
-            .foregroundStyle(AgePonyColors.tealCore)
 
             if let msg = qrError {
-                Text(msg)
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(AgePonyColors.destructive)
+                StatusText(msg)
+                    .font(AgePonyTypography.footnote)
             }
         } header: {
             Text("Scan a QR code")
         } footer: {
-            Text("The QR's text content is parsed as if you'd pasted it — `age1...` strings and `ssh-*` lines both work.")
+            Text("The QR code's text is read as if you'd pasted it. `age1...` strings and `ssh-*` lines both work.")
         }
     }
 
@@ -180,9 +176,8 @@ struct AddRecipientView: View {
             }
 
             if let msg = githubError {
-                Text(msg)
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(AgePonyColors.destructive)
+                StatusText(msg)
+                    .font(AgePonyTypography.footnote)
             }
 
             Button {
@@ -193,13 +188,10 @@ struct AddRecipientView: View {
                         ProgressView()
                         Text("Fetching…")
                     }
-                    .font(AgePonyTypography.footnote)
                 } else {
-                    Label("Fetch", systemImage: "arrow.down.circle")
-                        .font(AgePonyTypography.footnote)
+                    Label("Fetch keys", systemImage: "arrow.down.circle")
                 }
             }
-            .foregroundStyle(AgePonyColors.tealCore)
             .disabled(githubUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || githubLoading)
         } header: {
             Text("Fetch from GitHub")
@@ -215,13 +207,13 @@ struct AddRecipientView: View {
                     HStack(spacing: 12) {
                         Toggle("", isOn: $candidate.include)
                             .labelsHidden()
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(typeLabel(candidate.candidate.type))
-                                .font(AgePonyTypography.caption)
+                                .font(AgePonyTypography.footnote)
                                 .foregroundStyle(.secondary)
                             TextField("Name", text: $candidate.name)
                                 .textInputAutocapitalization(.words)
-                                .font(AgePonyTypography.bodyEmph)
+                                .font(AgePonyTypography.body)
                         }
                     }
                     if let comment = candidate.candidate.sshComment, !comment.isEmpty {
@@ -241,7 +233,7 @@ struct AddRecipientView: View {
                 }
             }
         } header: {
-            Text("Found \(candidates.count) recipient\(candidates.count == 1 ? "" : "s")")
+            Text("Found ^[\(candidates.count) recipient](inflect: true)")
         } footer: {
             Text("Toggle off any you don't want to save. Names are local to your vault.")
         }
@@ -339,7 +331,7 @@ struct AddRecipientView: View {
             do {
                 _ = try vault.addRecipient(stored)
             } catch {
-                saveError = error.localizedDescription
+                saveError = UserMessage.text(for: error, fallback: String(localized: "Couldn't save the recipient to the vault."))
                 return
             }
         }
@@ -364,35 +356,31 @@ struct AddRecipientView: View {
     private func describePasteError(_ error: Error) -> String {
         if let e = error as? RecipientImportError {
             switch e {
-            case .unrecognizedFormat:        return "Couldn't recognize that. Expected an `age1...` recipient or an `ssh-ed25519 ...` / `ssh-rsa ...` line."
-            case .noUsableKeysInResponse:    return "No usable keys."
-            case .fetchFailed(let m):        return "Fetch failed: \(m)"
-            case .invalidUsername:           return "Invalid username."
+            case .unrecognizedFormat:        return String(localized: "Couldn't recognize that. Expected an age1… recipient, or an ssh-ed25519 or ssh-rsa line.")
+            case .noUsableKeysInResponse, .fetchFailed, .invalidUsername:
+                break
             }
         }
-        if let e = error as? Bech32Error {
-            return "Not a valid age recipient. (\(e))"
-        }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "That isn't a recipient AgePony can use."))
     }
 
     private func describeFetchError(_ error: Error) -> String {
         if let e = error as? RecipientImportError {
             switch e {
-            case .invalidUsername:           return "Usernames may only contain letters, numbers, hyphens, and underscores."
-            case .fetchFailed(let m):        return "Couldn't fetch: \(m)"
-            case .noUsableKeysInResponse:    return "GitHub returned no ed25519 or RSA public keys for that user."
-            case .unrecognizedFormat:        return "Unexpected response from GitHub."
+            case .invalidUsername:           return String(localized: "Usernames may only contain letters, numbers, hyphens, and underscores.")
+            case .fetchFailed(let m):        return m
+            case .noUsableKeysInResponse:    return String(localized: "That GitHub account has no Ed25519 or RSA public keys. AgePony can't use its other key types.")
+            case .unrecognizedFormat:        return String(localized: "GitHub's answer wasn't a list of keys. Try again later.")
             }
         }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't fetch the keys from GitHub."))
     }
 
     private func describeQRError(_ error: QRScannerError) -> String {
         switch error {
-        case .cameraUnavailable: return "Camera unavailable on this device."
-        case .permissionDenied:  return "Camera access denied. Enable it for AgePony in Settings → AgePony."
-        case .setupFailed(let m): return "Camera setup failed: \(m)"
+        case .cameraUnavailable: return String(localized: "This device has no camera AgePony can use. Paste the key instead.")
+        case .permissionDenied:  return String(localized: "Camera access is off. Turn it on for AgePony in the Settings app.")
+        case .setupFailed:       return String(localized: "The camera couldn't start. Close the scanner and try again, or paste the key instead.")
         }
     }
 }
@@ -408,30 +396,24 @@ private struct QRScannerHostView: View {
     let onError: (QRScannerError) -> Void
 
     var body: some View {
-        ZStack(alignment: .top) {
+        NavigationStack {
             QRScannerView(onDetect: onDetect, onError: onError)
-                .ignoresSafeArea()
-
-            VStack {
-                HStack {
-                    Button("Cancel", action: onCancel)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 16)
-                        .background(.ultraThinMaterial, in: Capsule())
-                    Spacer()
+                .ignoresSafeArea(edges: .bottom)
+                .safeAreaInset(edge: .bottom) {
+                    Text("Scan a QR code containing an age recipient or SSH public key.")
+                        .font(AgePonyTypography.subheadline)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(16)
+                        .background(Color(.systemBackground))
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
-                Spacer()
-                Text("Scan a QR code containing an age recipient or SSH public key.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .padding(.bottom, 40)
-            }
+                .navigationTitle("Scan a QR code")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", action: onCancel)
+                    }
+                }
         }
     }
 }

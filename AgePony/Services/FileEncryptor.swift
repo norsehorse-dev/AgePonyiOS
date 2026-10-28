@@ -162,7 +162,7 @@ public enum FileEncryptor {
             } else {
                 try? FileManager.default.removeItem(at: outURL)
             }
-            throw FileEncryptorError.ageError(String(describing: error))
+            throw FileEncryptorError.ageError(UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the file.")))
         }
 
         try protectFile(at: outURL)
@@ -257,9 +257,9 @@ public enum FileEncryptor {
             // An armor problem surfaces through the decoding source rather than as a
             // read failure, so prefer its error when there is one.
             if let armorError = (source as? ArmorDecodingSource)?.streamError {
-                throw FileEncryptorError.readFailed(String(describing: armorError))
+                throw FileEncryptorError.readFailed(UserMessage.text(for: armorError, fallback: String(localized: "The armored text is damaged.")))
             }
-            throw FileEncryptorError.ageError(String(describing: error))
+            throw FileEncryptorError.ageError(UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the file.")))
         }
 
         let parsed: SignedBundle.StreamParsed?
@@ -270,7 +270,8 @@ public enum FileEncryptor {
             // this is not a decrypt failure -- say so, rather than leaving the user
             // with a half-written file and a misleading message.
             cleanupTempFile(at: outURL)
-            throw FileEncryptorError.bundleDamaged(String(describing: error))
+            let detail = UserMessage.text(for: error, fallback: String(localized: "The bundle is damaged or incomplete."))
+            throw FileEncryptorError.bundleDamaged(String(localized: "The file decrypted, but the signed bundle inside it is damaged. \(detail)"))
         }
 
         try protectFile(at: outURL)
@@ -354,7 +355,7 @@ public enum FileEncryptor {
         do {
             tar = try TarArchive.source(entries)
         } catch {
-            throw FileEncryptorError.ageError(String(describing: error))
+            throw FileEncryptorError.ageError(UserMessage.text(for: error, fallback: String(localized: "Couldn't put the files into one archive.")))
         }
 
         return try encrypt(
@@ -410,7 +411,7 @@ public enum FileEncryptor {
             throw e
         } catch {
             cleanupTempFile(at: outURL)
-            throw FileEncryptorError.writeFailed(String(describing: error))
+            throw FileEncryptorError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't write the archive.")))
         }
 
         try protectFile(at: outURL)
@@ -439,7 +440,7 @@ public enum FileEncryptor {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            throw FileEncryptorError.writeFailed(error.localizedDescription)
+            throw FileEncryptorError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't make a folder for the encrypted files.")))
         }
 
         var results: [BatchResult] = []
@@ -479,7 +480,7 @@ public enum FileEncryptor {
         do {
             plaintext = try Age.decrypt(ciphertext: binary, identities: identities)
         } catch {
-            throw FileEncryptorError.ageError(String(describing: error))
+            throw FileEncryptorError.ageError(UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the file.")))
         }
         return try writeToFreshTempDir(
             name: plaintextName(for: outputBaseName),
@@ -496,7 +497,7 @@ public enum FileEncryptor {
         do {
             plaintext = try Age.decrypt(ciphertext: binary, passphrase: passphrase)
         } catch {
-            throw FileEncryptorError.ageError(String(describing: error))
+            throw FileEncryptorError.ageError(UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the file.")))
         }
         return try writeToFreshTempDir(
             name: plaintextName(for: outputBaseName),
@@ -571,20 +572,15 @@ public enum FileEncryptor {
             }
         }
 
+        let packageMessage = String(localized: "\(url.lastPathComponent) is a package and couldn't be flattened for reading.")
         if let coordinatorError {
-            throw FileEncryptorError.readFailed(
-                "\(url.lastPathComponent) is a package and couldn't be flattened for reading: \(coordinatorError.localizedDescription)"
-            )
+            throw FileEncryptorError.readFailed(UserMessage.text(for: coordinatorError, fallback: packageMessage))
         }
         if let copyError {
-            throw FileEncryptorError.readFailed(
-                "\(url.lastPathComponent) is a package and couldn't be flattened for reading: \(String(describing: copyError))"
-            )
+            throw FileEncryptorError.readFailed(UserMessage.text(for: copyError, fallback: packageMessage))
         }
         guard let flattenedURL else {
-            throw FileEncryptorError.readFailed(
-                "\(url.lastPathComponent) is a package and couldn't be flattened for reading."
-            )
+            throw FileEncryptorError.readFailed(packageMessage)
         }
         return (flattenedURL, true)
     }
@@ -601,7 +597,7 @@ public enum FileEncryptor {
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            throw FileEncryptorError.writeFailed(error.localizedDescription)
+            throw FileEncryptorError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't make a temporary folder for the output.")))
         }
         return dir.appendingPathComponent(name)
     }
@@ -615,7 +611,7 @@ public enum FileEncryptor {
                 ofItemAtPath: url.path
             )
         } catch {
-            throw FileEncryptorError.writeFailed(error.localizedDescription)
+            throw FileEncryptorError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't protect the output file.")))
         }
     }
 
@@ -624,7 +620,7 @@ public enum FileEncryptor {
         do {
             try bytes.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
         } catch {
-            throw FileEncryptorError.writeFailed(error.localizedDescription)
+            throw FileEncryptorError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't write the output file.")))
         }
         return url
     }
@@ -769,7 +765,7 @@ extension FileEncryptor {
             }
         } catch {
             cleanupTempFile(at: outURL)
-            throw FileEncryptorError.ageError(String(describing: error))
+            throw FileEncryptorError.ageError(UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt and sign the file.")))
         }
 
         try protectFile(at: outURL)

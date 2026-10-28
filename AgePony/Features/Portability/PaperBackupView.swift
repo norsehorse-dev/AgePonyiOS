@@ -60,9 +60,10 @@ struct PaperBackupView: View {
                 optionSections
             }
             if let error {
-                Section { Text(error).foregroundStyle(.red).font(AgePonyTypography.footnote) }
+                Section { StatusText(error).font(AgePonyTypography.subheadline) }
             }
         }
+        .textCase(nil)
         .navigationTitle("Paper backup")
         .navigationBarTitleDisplayMode(.inline)
         .ownerCheck(owner, vault: vault)
@@ -100,26 +101,33 @@ struct PaperBackupView: View {
                     }
                 if !wordlist.isEmpty {
                     Button("Suggest a \(Diceware.defaultWordCount)-word passphrase") { suggest() }
-                        .foregroundStyle(AgePonyColors.tealCore)
                 }
                 if let suggested {
-                    Text("Write this down now, apart from the page: \(suggested)")
-                        .font(AgePonyTypography.monoSmall)
-                        .textSelection(.disabled)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Write this down now, apart from the page:")
+                            .font(AgePonyTypography.subheadline)
+                        Text(verbatim: suggested)
+                            .font(AgePonyTypography.monoSmall)
+                    }
+                    .textSelection(.disabled)
                 }
             } footer: {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     if !confirm.isEmpty && passphrase != confirm {
-                        Text("The passphrases don't match.").foregroundStyle(.red)
+                        StatusText("The passphrases don't match.")
                     }
                     Text("The page is an ordinary age file: restore it in AgePony, or with `age -d` on a computer.")
                 }
             }
         } else {
             Section {
-                Text("Only choose this for a page that will live somewhere locked, like a safe.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.red)
+                Label {
+                    Text("Only choose this for a page that will live somewhere locked, like a safe.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(AgePonyColors.warning)
+                }
+                .font(AgePonyTypography.subheadline)
             }
         }
 
@@ -128,12 +136,16 @@ struct PaperBackupView: View {
         // one and make the user say so before building the page.
         if let weakness {
             Section {
-                Text("This passphrase is weak: \(weakness). Anyone who finds the page can try guesses offline for as long as they like. Use the suggested passphrase, or a longer one of your own.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.red)
+                Label {
+                    Text("This passphrase is weak: \(weakness). Anyone who finds the page can try guesses offline for as long as they like. Use the suggested passphrase, or a longer one of your own.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(AgePonyColors.warning)
+                }
+                .font(AgePonyTypography.subheadline)
                 if acceptedWeak {
                     Text("Using the weak passphrase anyway.")
-                        .font(AgePonyTypography.footnote)
+                        .font(AgePonyTypography.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
                     Button("Use it anyway") { acceptedWeak = true }
@@ -142,8 +154,14 @@ struct PaperBackupView: View {
         }
 
         Section {
-            Button(busy ? "Preparing…" : "Create PDF") {
-                owner.confirm(vault, title: "Create paper backup") { build() }
+            Button {
+                owner.confirm(vault, title: String(localized: "Create paper backup")) { build() }
+            } label: {
+                if busy {
+                    Text("Preparing…")
+                } else {
+                    Text("Create PDF")
+                }
             }
             .buttonStyle(.agePonyPrimary)
             .disabled(!ready)
@@ -163,20 +181,31 @@ struct PaperBackupView: View {
 
     @ViewBuilder private func readySections(_ url: URL) -> some View {
         Section {
-            Label("PDF ready", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(AgePonyColors.tealCore)
-                .font(AgePonyTypography.headline)
+            Label {
+                Text("PDF ready")
+            } icon: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(AgePonyColors.success)
+            }
+            .font(AgePonyTypography.headline)
             ShareLink(item: url) {
                 Label("Save, print or share the PDF…", systemImage: "square.and.arrow.up")
             }
         } footer: {
-            Text("Print it on a printer you trust, then delete the PDF. Store the page somewhere safe"
-                 + (builtProtected ? ", and keep the passphrase somewhere else." : ". Anyone who sees it has the key."))
+            if builtProtected {
+                Text("Print it on a printer you trust, then delete the PDF. Store the page somewhere safe, and keep the passphrase somewhere else.")
+            } else {
+                Text("Print it on a printer you trust, then delete the PDF. Store the page somewhere safe. Anyone who sees it has the key.")
+            }
         }
         Section {
-            Label("Printing over AirPrint sends the page through the printer and any print server or service between, and some keep or forward a copy. A printer cabled or on a network you control is safer.", systemImage: "printer")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.orange)
+            Label {
+                Text("Printing over AirPrint sends the page through the printer and any print server or service between, and some keep or forward a copy. A printer cabled or on a network you control is safer.")
+            } icon: {
+                Image(systemName: "printer")
+                    .foregroundStyle(AgePonyColors.warning)
+            }
+            .font(AgePonyTypography.subheadline)
         }
     }
 
@@ -192,11 +221,11 @@ struct PaperBackupView: View {
 
     private func build() {
         guard let line = KeyPortability.identityLine(identity), KeyPortability.isPaperBackable(identity) else {
-            error = "Only age identities can be backed up on paper."
+            error = String(localized: "Only age identities can be backed up on paper.")
             return
         }
         if protect, !ScryptMemory.fits(workFactor: PaperBackup.defaultWorkFactor) {
-            error = "There isn't enough free memory to protect the page right now (it needs \(ScryptMemory.memoryLabel(workFactor: PaperBackup.defaultWorkFactor))). Close other apps and try again."
+            error = String(localized: "There isn't enough free memory to protect the page right now (it needs \(ScryptMemory.memoryLabel(workFactor: PaperBackup.defaultWorkFactor))). Close other apps and try again.")
             return
         }
         busy = true
@@ -219,7 +248,7 @@ struct PaperBackupView: View {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.error = "Couldn't build the backup: \(error.localizedDescription)"
+                    self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't build the backup page."))
                     busy = false
                 }
             }
@@ -230,13 +259,13 @@ struct PaperBackupView: View {
     /// 12 characters is weak; so is a passphrase made of words (diceware style) with fewer
     /// than `Diceware.minWordCount` of them, whatever its length.
     static func passphraseWeakness(_ passphrase: String) -> String? {
-        if passphrase.count < 12 { return "it is shorter than 12 characters" }
+        if passphrase.count < 12 { return String(localized: "it is shorter than 12 characters") }
         let words = passphrase.trimmingCharacters(in: .whitespaces)
             .components(separatedBy: CharacterSet(charactersIn: " \t._-"))
             .filter { !$0.isEmpty }
         let looksLikeWords = words.count >= 2 && words.allSatisfy { $0.allSatisfy(\.isLetter) }
         if looksLikeWords && words.count < Diceware.minWordCount {
-            return "it has only \(words.count) words, and at least \(Diceware.minWordCount) are needed"
+            return String(AttributedString(localized: "it has only ^[\(words.count) word](inflect: true), and at least \(Diceware.minWordCount) are needed").characters)
         }
         return nil
     }
@@ -274,13 +303,15 @@ nonisolated enum PaperPage {
             let body = UIFont.systemFont(ofSize: 10)
             let mono = UIFont.monospacedSystemFont(ofSize: 8.5, weight: .regular)
 
-            text("AgePony paper backup", title, gap: 10)
-            text("Name: \(name)", body)
-            text("Created: \(portabilityStamp())", body)
-            text(passphrase != nil
-                 ? "Protected with a passphrase (age scrypt). The passphrase is not on this page."
-                 : "UNPROTECTED: this page is the private key.", body)
-            text("Public key (to check which key this is):", body)
+            text(String(localized: "AgePony paper backup"), title, gap: 10)
+            text(String(localized: "Name: \(name)"), body)
+            text(String(localized: "Created: \(portabilityStamp())"), body)
+            if passphrase != nil {
+                text(String(localized: "Protected with a passphrase (age scrypt). The passphrase is not on this page."), body)
+            } else {
+                text(String(localized: "Not protected: this page is the private key."), body)
+            }
+            text(String(localized: "Public key (to check which key this is):"), body)
             let pub = line.publicKey
             text(pub.count <= 88 ? pub : "\(pub.prefix(40)) … \(pub.suffix(24))", mono, gap: 12)
 
@@ -290,15 +321,15 @@ nonisolated enum PaperPage {
                 y += side + 16
             }
 
-            text(passphrase != nil ? "Backup text (an armored age file):" : "Secret key:", body)
+            text(passphrase != nil ? String(localized: "Backup text (an armored age file):") : String(localized: "Secret key:"), body)
             let lines = passphrase != nil
                 ? payload.components(separatedBy: "\n").filter { !$0.isEmpty }
                 : PaperBackup.transcriptionGroups(payload, perLine: 12)
             for l in lines { text(l, mono, gap: 1.5) }
             y += 10
-            text("To restore: AgePony › Settings › Restore from a paper backup, then scan the code.", body)
+            text(String(localized: "To restore, open Restore from a paper backup in AgePony's Settings and scan the code."), body)
             if passphrase != nil {
-                text("Or on a computer: save the text as backup.age and run  age -d -o key.txt backup.age", body)
+                text(String(localized: "Or on a computer: save the text as backup.age and run  age -d -o key.txt backup.age"), body)
             }
         }
     }

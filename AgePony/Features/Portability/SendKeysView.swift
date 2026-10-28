@@ -61,9 +61,10 @@ struct SendKeysView: View {
             case .done: doneSections
             }
             if let error {
-                Section { Text(error).foregroundStyle(.red).font(AgePonyTypography.footnote) }
+                Section { StatusText(error).font(AgePonyTypography.subheadline) }
             }
         }
+        .textCase(nil)
         .navigationTitle("Send keys")
         .navigationBarTitleDisplayMode(.inline)
         .ownerCheck(owner, vault: vault)
@@ -81,18 +82,24 @@ struct SendKeysView: View {
     @ViewBuilder private var pickSections: some View {
         Section {
             Text("Your keys are encrypted to a one-time key shown by the receiving device, so the file you move is useless to anyone else. Start Receive keys on the other device first.")
-                .font(AgePonyTypography.footnote)
+                .font(AgePonyTypography.subheadline)
         }
         Section {
             if movable.isEmpty {
-                Text("No identities that can be moved.").font(AgePonyTypography.footnote)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("No identities to send")
+                        .font(AgePonyTypography.headline)
+                    Text("Only identities stored in AgePony itself can move to another device. Keys in the Secure Enclave, on a YubiKey or on a security key stay where they are. You can still send your saved recipients and trusted signers.")
+                        .font(AgePonyTypography.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
             ForEach(movable) { id in
                 CheckLine(label: id.name, checked: chosen.contains(id.id)) { chosen.formSymmetricDifference([id.id]) }
             }
             ForEach(bound) { id in
                 Text("\(id.name): stays on this device (hardware key)")
-                    .font(AgePonyTypography.footnote)
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
             }
         } header: {
@@ -114,7 +121,8 @@ struct SendKeysView: View {
         }
         Section {
             TextField("…or paste its key (age1pq1…)", text: $recipientText)
-                .font(AgePonyTypography.monoSmall)
+                // Mono for the key itself, not for the prompt.
+                .font(recipientText.isEmpty ? AgePonyTypography.body : AgePonyTypography.monoSmall)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             Button("Use pasted key") { useRecipient(recipientText) }
@@ -130,14 +138,16 @@ struct SendKeysView: View {
                     useRecipient(value)
                 }, onError: { failure in
                     switch failure {
-                    case .permissionDenied: scanError = "Camera access is off. Turn it on in Settings, or paste the key instead."
-                    case .cameraUnavailable: scanError = "No camera is available."
-                    case .setupFailed(let why): scanError = why
+                    case .permissionDenied: scanError = String(localized: "Camera access is off. Turn it on in Settings, or paste the key instead.")
+                    case .cameraUnavailable: scanError = String(localized: "No camera is available.")
+                    case .setupFailed: scanError = UserMessage.text(for: failure, fallback: String(localized: "The camera couldn't start. Paste the key instead."))
                     }
                 })
                 .ignoresSafeArea()
                 if let scanError {
-                    Text(scanError)
+                    // .thinMaterial only here, over the live camera feed, so the
+                    // message stays legible (5.1.0, U4).
+                    StatusText(scanError)
                         .padding()
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
                         .padding()
@@ -159,16 +169,20 @@ struct SendKeysView: View {
         Section {
             BigCode(code: KeyTransfer.confirmationCode(recipient: recipientText), size: 24)
             if !recipientText.hasPrefix("age1pq1") {
-                Text("This receiving key isn't quantum-safe. Quantum-safe identities sent to it lose that protection in transit.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.red)
+                Label {
+                    Text("This receiving key isn't quantum-safe. Quantum-safe identities sent to it lose that protection in transit.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(AgePonyColors.warning)
+                }
+                .font(AgePonyTypography.subheadline)
             }
         } header: {
             Text("Does the receiving device show this code?")
         }
         Section {
             Button("It matches, send") {
-                owner.confirm(vault, title: "Send keys") { seal() }
+                owner.confirm(vault, title: String(localized: "Send keys")) { seal() }
             }
             .buttonStyle(.agePonyPrimary)
             .listRowInsets(EdgeInsets())
@@ -195,24 +209,33 @@ struct SendKeysView: View {
 
     @ViewBuilder private var sentSection: some View {
         Section {
-            Label("Sent", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(AgePonyColors.tealCore)
-                .font(AgePonyTypography.headline)
+            Label {
+                Text("Sent")
+            } icon: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(AgePonyColors.success)
+            }
+            .font(AgePonyTypography.headline)
             Text("The other phone has the keys. Check what it lists and tap Import there.")
         }
         if let sentCode { transferCodeSection(sentCode) }
         Section {
-            Button("Done") { dismiss() }.foregroundStyle(AgePonyColors.tealCore)
+            Button("Done") { dismiss() }
         }
     }
 
     @ViewBuilder private var doneSections: some View {
         Section {
-            Text(invite != nil ? "Couldn't send directly, so here's the file instead" : "Transfer ready")
-                .font(AgePonyTypography.headline)
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Move it to the other device any way you like: only that receive session can open it. Delete it from the middle once it's imported.")
-                .font(AgePonyTypography.footnote)
+            Group {
+                if invite != nil {
+                    Text("Couldn't send directly, so here's the file instead")
+                } else {
+                    Text("Transfer ready")
+                }
+            }
+            .font(AgePonyTypography.headline)
+            Text("Move it to the other device any way you like: only that receive session can open it. Delete it from wherever it passed through once it's imported.")
+                .font(AgePonyTypography.subheadline)
         }
         // The same code for the file and the text version: it covers the transfer itself,
         // not how it travels.
@@ -228,7 +251,7 @@ struct SendKeysView: View {
                     Label("Share as text…", systemImage: "text.alignleft")
                 }
             }
-            Button("Done") { dismiss() }.foregroundStyle(AgePonyColors.tealCore)
+            Button("Done") { dismiss() }
         }
     }
 
@@ -257,7 +280,7 @@ struct SendKeysView: View {
             recipientText = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             stage = .confirm
         } catch {
-            self.error = "That isn't a receiving key. Scan the code on the other phone's Receive keys screen."
+            self.error = String(localized: "That isn't a receiving key. Scan the code on the other phone's Receive keys screen.")
             stage = .pick
         }
     }
@@ -273,7 +296,7 @@ struct SendKeysView: View {
         do {
             bundle = try KeyPortability.buildBundle(identities: ids, recipients: recips, signers: signers)
         } catch {
-            self.error = "Couldn't build the transfer: \(error.localizedDescription)"
+            self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't build the transfer."))
             stage = .confirm
             return
         }
@@ -300,14 +323,14 @@ struct SendKeysView: View {
                             fileURL = nil
                         } catch {
                             // Direct delivery failed: keep the sealed transfer and offer the file.
-                            self.error = error.localizedDescription
+                            self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't send directly to the other phone."))
                             stage = .done
                         }
                     }
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.error = "Couldn't build the transfer: \(error.localizedDescription)"
+                    self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't seal the transfer."))
                     stage = .confirm
                 }
             }

@@ -32,7 +32,7 @@ struct NotesView: View {
                 Button {
                     showingCreate = true
                 } label: {
-                    Image(systemName: "plus")
+                    Label("New note", systemImage: "plus")
                 }
             }
         }
@@ -45,7 +45,7 @@ struct NotesView: View {
             NoteDetailView(vault: vault, noteID: note.id)
         }
         .confirmationDialog(
-            pendingDelete.map { "Delete \"\($0.title)\"?" } ?? "",
+            pendingDelete.map { String(localized: "Delete \"\($0.title)\"?") } ?? "",
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             titleVisibility: .visible
         ) {
@@ -63,22 +63,15 @@ struct NotesView: View {
 
     // MARK: - Subviews
 
+    /// The one empty-state pattern (5.1.0, U4): what a note is and how to add one.
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Image(systemName: "note.text.badge.plus")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("No notes yet")
-                .font(AgePonyTypography.title)
-            Text("Tap + to create your first encrypted note. Each note has its own passphrase.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
-            Spacer()
+        ContentUnavailableView {
+            Label("No notes", systemImage: "note.text")
+        } description: {
+            Text("A note is text kept encrypted in AgePony with its own passphrase, separate from your vault's lock. Tap New note to write one.")
+        } actions: {
+            Button("New note") { showingCreate = true }
         }
-        .frame(maxWidth: .infinity)
     }
 
     private var noteList: some View {
@@ -96,6 +89,7 @@ struct NotesView: View {
                 }
             }
         }
+        .textCase(nil)
         .listStyle(.insetGrouped)
     }
 
@@ -112,16 +106,22 @@ private struct NoteRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "lock.doc")
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
+                .font(AgePonyTypography.body)
+                .foregroundStyle(.secondary)
                 .frame(width: 28)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(note.title.isEmpty ? "Untitled" : note.title)
-                    .font(AgePonyTypography.bodyEmph)
-                    .lineLimit(1)
+            VStack(alignment: .leading, spacing: 4) {
+                Group {
+                    if note.title.isEmpty {
+                        Text("Untitled")
+                    } else {
+                        Text(note.title)
+                    }
+                }
+                .font(AgePonyTypography.body)
+                .lineLimit(1)
                 Text(timestampLabel)
-                    .font(AgePonyTypography.caption)
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -132,6 +132,7 @@ private struct NoteRow: View {
     private var timestampLabel: String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
-        return "Edited " + formatter.localizedString(for: note.updatedAt, relativeTo: Date())
+        let relative = formatter.localizedString(for: note.updatedAt, relativeTo: Date())
+        return String(localized: "Edited \(relative)")
     }
 }

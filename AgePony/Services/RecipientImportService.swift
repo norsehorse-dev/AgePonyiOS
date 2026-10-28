@@ -156,12 +156,12 @@ public enum RecipientImportService {
         } catch let e as SSHKeySourceError {
             switch e {
             case .invalidURL:           throw RecipientImportError.invalidUsername
-            case .fetchFailed(let s):   throw RecipientImportError.fetchFailed("HTTP \(s)")
+            case .fetchFailed(let s):   throw RecipientImportError.fetchFailed(String(localized: "GitHub didn't return the keys (HTTP \(s))."))
             case .noUsableKeys:         throw RecipientImportError.noUsableKeysInResponse
-            case .proxyMisconfigured:   throw RecipientImportError.fetchFailed("The proxy needs a host and port")
+            case .proxyMisconfigured:   throw RecipientImportError.fetchFailed(String(localized: "The proxy settings are incomplete. Check Network in Settings."))
             }
         } catch {
-            throw RecipientImportError.fetchFailed(error.localizedDescription)
+            throw RecipientImportError.fetchFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't fetch the keys from GitHub.")))
         }
 
         if recipients.isEmpty {

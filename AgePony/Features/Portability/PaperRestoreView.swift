@@ -41,9 +41,10 @@ struct PaperRestoreView: View {
             case .done: doneSection
             }
             if let error {
-                Section { Text(error).foregroundStyle(.red).font(AgePonyTypography.footnote) }
+                Section { StatusText(error).font(AgePonyTypography.subheadline) }
             }
         }
+        .textCase(nil)
         .navigationTitle("Restore from paper")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $scanning) { scannerSheet }
@@ -66,7 +67,8 @@ struct PaperRestoreView: View {
         Section {
             TextField("…or type or paste the text", text: $scanned, axis: .vertical)
                 .lineLimit(4...12)
-                .font(AgePonyTypography.monoSmall)
+                // Mono for the key text, not for the prompt.
+                .font(scanned.isEmpty ? AgePonyTypography.body : AgePonyTypography.monoSmall)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             Button("Continue") { take(scanned) }
@@ -79,8 +81,16 @@ struct PaperRestoreView: View {
             SecureField("Passphrase", text: $passphrase)
                 .textContentType(.password)
                 .onChange(of: passphrase) { error = nil }
-            Button(busy ? "Opening…" : "Open backup") { open() }
-                .disabled(passphrase.isEmpty || busy)
+            Button {
+                open()
+            } label: {
+                if busy {
+                    Text("Opening…")
+                } else {
+                    Text("Open backup")
+                }
+            }
+            .disabled(passphrase.isEmpty || busy)
             if busy {
                 HStack { Spacer(); ProgressView(); Spacer() }
             }
@@ -94,7 +104,7 @@ struct PaperRestoreView: View {
     private var previewSection: some View {
         Section {
             ForEach(found) { identity in
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(identity.name)
                     Text(KeyPortability.keySummary(identity))
                         .font(AgePonyTypography.monoCaption)
@@ -102,7 +112,6 @@ struct PaperRestoreView: View {
                 }
             }
             Button("Add to vault") { add() }
-                .foregroundStyle(AgePonyColors.tealCore)
         } header: {
             Text("Found")
         } footer: {
@@ -113,10 +122,17 @@ struct PaperRestoreView: View {
     @ViewBuilder private var doneSection: some View {
         if let s = summary {
             Section {
-                Label(s.identitiesAdded > 0 ? "Restored \(s.identitiesAdded) \(s.identitiesAdded == 1 ? "identity" : "identities")" : "That key is already in your vault.",
-                      systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(AgePonyColors.tealCore)
-                Button("Done") { dismiss() }.foregroundStyle(AgePonyColors.tealCore)
+                Label {
+                    if s.identitiesAdded > 0 {
+                        Text("Restored ^[\(s.identitiesAdded) identity](inflect: true)")
+                    } else {
+                        Text("That key is already in your vault.")
+                    }
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(AgePonyColors.success)
+                }
+                Button("Done") { dismiss() }
             }
         }
     }
@@ -129,14 +145,16 @@ struct PaperRestoreView: View {
                     take(value)
                 }, onError: { failure in
                     switch failure {
-                    case .permissionDenied: scanError = "Camera access is off. Turn it on in Settings, or type the text instead."
-                    case .cameraUnavailable: scanError = "No camera is available."
-                    case .setupFailed(let why): scanError = why
+                    case .permissionDenied: scanError = String(localized: "Camera access is off. Turn it on in Settings, or type the text instead.")
+                    case .cameraUnavailable: scanError = String(localized: "No camera is available.")
+                    case .setupFailed: scanError = UserMessage.text(for: failure, fallback: String(localized: "The camera couldn't start. Type the text instead."))
                     }
                 })
                 .ignoresSafeArea()
                 if let scanError {
-                    Text(scanError)
+                    // .thinMaterial only here, over the live camera feed, so the
+                    // message stays legible (5.1.0, U4).
+                    StatusText(scanError)
                         .padding()
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
                         .padding()
@@ -162,7 +180,7 @@ struct PaperRestoreView: View {
         } else {
             found = KeyPortability.identitiesFromText(text)
             if found.isEmpty {
-                error = "No age secret key found in that."
+                error = String(localized: "No age secret key found in that.")
                 stage = .input
             } else {
                 stage = .preview
@@ -174,7 +192,7 @@ struct PaperRestoreView: View {
         // A page made elsewhere could ask for more scrypt memory than iOS gives AgePony:
         // refuse it before the derivation starts rather than crash.
         if let factor = Self.largestWorkFactor(scanned), !ScryptMemory.fits(workFactor: factor) {
-            error = "Its passphrase work factor (\(ScryptMemory.describe(workFactor: factor))) needs more memory than iOS will give AgePony right now."
+            error = String(localized: "Its passphrase work factor (\(ScryptMemory.describe(workFactor: factor))) needs more memory than iOS will give AgePony right now.")
             return
         }
         busy = true
@@ -188,7 +206,7 @@ struct PaperRestoreView: View {
                 case .success(let identityFile):
                     found = KeyPortability.identitiesFromText(identityFile)
                     if found.isEmpty {
-                        error = "The backup opened but held no age key."
+                        error = String(localized: "The backup opened but held no age key.")
                         stage = .input
                     } else {
                         passphrase = ""
@@ -196,9 +214,14 @@ struct PaperRestoreView: View {
                     }
                 case .failure(let e):
                     switch e as? PaperBackupError {
-                    case .wrongPassphrase?: error = "Wrong passphrase."
-                    case .damaged?, .notSealed?: error = "The backup text is damaged or incomplete. Check it against the page."
-                    default: error = "Couldn't open the backup."
+                    case .wrongPassphrase?: error = String(localized: "Wrong passphrase.")
+                    case .damaged?, .notSealed?: error = String(localized: "The backup text is damaged or incomplete. Check it against the page.")
+                    default:
+                        if let age = e as? AgeError, case .wrongPassphrase = age {
+                            error = String(localized: "Wrong passphrase.")
+                        } else {
+                            error = UserMessage.text(for: e, fallback: String(localized: "Couldn't open the backup page."))
+                        }
                     }
                 }
             }
@@ -212,7 +235,7 @@ struct PaperRestoreView: View {
             scanned = ""
             stage = .done
         } catch {
-            self.error = "Couldn't save to the vault: \(error.localizedDescription)"
+            self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't save the restored keys to the vault."))
         }
     }
 

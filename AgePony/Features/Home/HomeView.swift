@@ -46,42 +46,40 @@ struct HomeView: View {
         TabView(selection: $selectedTab) {
             NavigationStack {
                 FilesView(vault: vault, pendingExternalDecryptURL: $pendingFileURL)
-                    .toolbar(.hidden, for: .navigationBar)
+                    .navigationTitle("Files")
             }
             .tabItem { Label("Files", systemImage: "doc.badge.gearshape") }
             .tag(Tab.files)
 
             NavigationStack {
                 NotesView(vault: vault)
-                    .navigationTitle("")
-                    .navigationBarTitleDisplayMode(.inline)
+                    .navigationTitle("Notes")
             }
             .tabItem { Label("Notes", systemImage: "note.text") }
             .tag(Tab.notes)
 
             NavigationStack {
                 TextModeView(vault: vault)
-                    .toolbar(.hidden, for: .navigationBar)
+                    .navigationTitle("Text")
             }
             .tabItem { Label("Text", systemImage: "textformat.alt") }
             .tag(Tab.text)
 
             NavigationStack {
                 IdentitiesView(vault: vault)
-                    .navigationTitle("")
-                    .navigationBarTitleDisplayMode(.inline)
+                    .navigationTitle("Identities")
             }
             .tabItem { Label("Identities", systemImage: "key") }
             .tag(Tab.identities)
 
             NavigationStack {
                 SettingsView(vault: vault)
-                    .toolbar(.hidden, for: .navigationBar)
+                    .navigationTitle("Settings")
             }
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(Tab.settings)
         }
-        .tint(AgePonyColors.tealCore)
+        .tint(AgePonyColors.accent)
         .onReceive(NotificationCenter.default.publisher(for: .agePonyOpenAgeFile)) { note in
             if let url = note.userInfo?["url"] as? URL {
                 selectedTab = .files
@@ -101,7 +99,7 @@ struct HomeView: View {
         .onReceive(NotificationCenter.default.publisher(for: .agePonyOperationSucceeded)) { _ in
             // A successful encrypt just finished and the user dismissed the
             // flow. Ask StoreKit for a review if our own gating agrees it's a
-            // good moment — the short delay lets the encrypt sheet finish
+            // good moment. The short delay lets the encrypt sheet finish
             // dismissing so the native sheet isn't presented on top of it.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 ReviewPrompter.requestReviewIfAppropriate(using: requestReview)
@@ -178,17 +176,13 @@ private struct ShareIncomingSheet: View {
         }
     }
 
+    /// The share's manifest arrived but its file didn't (a sweep removed it, or
+    /// the copy from the share extension never finished).
     private var missingPayload: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Couldn't read the shared payload.")
-                .font(AgePonyTypography.headline)
-            Text("Try sharing it again from the source app.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
+        ContentUnavailableView {
+            Label("The shared file is missing", systemImage: "doc.questionmark")
+        } description: {
+            Text("AgePony received the share but not the file in it. Share it again from the other app.")
         }
-        .padding(32)
     }
 }

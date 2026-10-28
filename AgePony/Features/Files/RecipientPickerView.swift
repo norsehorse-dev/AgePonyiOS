@@ -92,6 +92,7 @@ struct RecipientPickerView: View {
             }
             confirmSection
         }
+        .textCase(nil)
         .navigationTitle("Choose recipients")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -145,7 +146,7 @@ struct RecipientPickerView: View {
             } header: {
                 Text("Saved recipients")
             } footer: {
-                Text("Recipients you've added in the Recipients tab.")
+                Text("Recipients you've added under Recipients on the Identities tab.")
             }
         }
     }
@@ -155,42 +156,52 @@ struct RecipientPickerView: View {
             ForEach(adHocRecipients) { ad in
                 HStack(spacing: 12) {
                     Image(systemName: "person.crop.circle.badge.plus")
-                        .foregroundStyle(AgePonyColors.tealCore)
-                    VStack(alignment: .leading, spacing: 2) {
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(ad.displayLabel)
                             .font(AgePonyTypography.footnote)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Text(ad.savedName.map { "saved as \"\($0)\"" } ?? "this file only, not saved")
-                            .font(AgePonyTypography.caption)
-                            .foregroundStyle(ad.savedName == nil
-                                             ? Color.secondary : AgePonyColors.tealCore)
+                        Group {
+                            if let savedName = ad.savedName {
+                                Text("Saved as \"\(savedName)\"")
+                            } else {
+                                Text("This file only, not saved")
+                            }
+                        }
+                        .font(AgePonyTypography.footnote)
+                        .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button(role: .destructive) {
-                        adHocRecipients.removeAll { $0.id == ad.id }
-                    } label: {
-                        Image(systemName: "minus.circle")
+                    // A labelled button with a full-height target, plus the
+                    // swipe (5.1.0, U4). It used to be a bare minus icon.
+                    Button("Remove", role: .destructive) {
+                        removeAdHoc(ad.id)
                     }
                     .buttonStyle(.borderless)
+                    .frame(minHeight: 44)
+                }
+                .swipeActions(edge: .trailing) {
+                    Button("Remove", role: .destructive) {
+                        removeAdHoc(ad.id)
+                    }
                 }
             }
 
-            TextField("Paste age1... or ssh-* AAAA... line", text: $pasteText, axis: .vertical)
-                .font(AgePonyTypography.monoCaption)
+            TextField("Paste an age1… or ssh- public key", text: $pasteText, axis: .vertical)
+                // Mono for the key itself, not for the prompt.
+                .font(pasteText.isEmpty ? AgePonyTypography.body : AgePonyTypography.monoCaption)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .lineLimit(1...4)
 
             if let msg = pasteError {
-                Text(msg)
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(AgePonyColors.destructive)
+                StatusText(msg)
+                    .font(AgePonyTypography.footnote)
             }
 
             if onSaveRecipient != nil {
                 TextField("Name (to save it for reuse)", text: $pasteName)
-                    .font(AgePonyTypography.footnote)
                     .textInputAutocapitalization(.words)
             }
 
@@ -198,9 +209,7 @@ struct RecipientPickerView: View {
                 addPasted(save: false)
             } label: {
                 Label("Use for this file only", systemImage: "plus.circle")
-                    .font(AgePonyTypography.footnote)
             }
-            .foregroundStyle(AgePonyColors.tealCore)
             .disabled(pasteIsEmpty)
 
             if onSaveRecipient != nil {
@@ -208,17 +217,17 @@ struct RecipientPickerView: View {
                     addPasted(save: true)
                 } label: {
                     Label("Save as recipient and use", systemImage: "square.and.arrow.down")
-                        .font(AgePonyTypography.footnote)
                 }
-                .foregroundStyle(AgePonyColors.tealCore)
                 .disabled(pasteIsEmpty)
             }
         } header: {
             Text("Paste a recipient")
         } footer: {
-            Text(onSaveRecipient == nil
-                 ? "Recipients added here apply only to this file. To reuse them, save in the Recipients tab."
-                 : "Use it once, or give it a name and keep it. Saved recipients appear in the Recipients tab. Without a name, a saved key is filed under the key's own label.")
+            if onSaveRecipient == nil {
+                Text("Recipients added here apply only to this file. To reuse one, save it under Recipients on the Identities tab.")
+            } else {
+                Text("Use it once, or give it a name and keep it. Saved recipients appear under Recipients on the Identities tab. Without a name, a saved key is filed under the key's own label.")
+            }
         }
     }
 
@@ -229,14 +238,13 @@ struct RecipientPickerView: View {
             SecureField("Confirm passphrase", text: $passphraseConfirm)
                 .textInputAutocapitalization(.never)
             if !passphraseConfirm.isEmpty && passphrase != passphraseConfirm {
-                Text("Passphrases don't match.")
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(AgePonyColors.destructive)
+                StatusText("Passphrases don't match.")
+                    .font(AgePonyTypography.footnote)
             }
         } header: {
             Text("Passphrase")
         } footer: {
-            Text("Use a long, random passphrase. There is no recovery if you forget it — scrypt is a brute-force-resistant KDF. Its strength is set in Settings.")
+            Text("Use a long, random passphrase. There is no recovery if you forget it. Scrypt makes guessing slow, and its strength is set in Settings.")
         }
     }
 
@@ -261,14 +269,20 @@ struct RecipientPickerView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: selectedIdentityIDs.contains(identity.id) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selectedIdentityIDs.contains(identity.id) ? AgePonyColors.tealCore : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
+                    .foregroundStyle(selectedIdentityIDs.contains(identity.id) ? AgePonyColors.accent : .secondary)
+                VStack(alignment: .leading, spacing: 4) {
                     Text(identity.name)
-                        .font(AgePonyTypography.bodyEmph)
+                        .font(AgePonyTypography.body)
                         .foregroundStyle(.primary)
                     Text(identityTypeLabel(identity.type))
-                        .font(AgePonyTypography.caption)
+                        .font(AgePonyTypography.subheadline)
                         .foregroundStyle(.secondary)
+                    // The Identities list's short form, so two keys with one name differ.
+                    Text(verbatim: identity.publicDisplayString())
+                        .font(AgePonyTypography.monoCaption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 Spacer()
             }
@@ -282,14 +296,20 @@ struct RecipientPickerView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: selectedRecipientIDs.contains(recipient.id) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selectedRecipientIDs.contains(recipient.id) ? AgePonyColors.tealCore : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
+                    .foregroundStyle(selectedRecipientIDs.contains(recipient.id) ? AgePonyColors.accent : .secondary)
+                VStack(alignment: .leading, spacing: 4) {
                     Text(recipient.name)
-                        .font(AgePonyTypography.bodyEmph)
+                        .font(AgePonyTypography.body)
                         .foregroundStyle(.primary)
                     Text(recipientTypeLabel(recipient.type))
-                        .font(AgePonyTypography.caption)
+                        .font(AgePonyTypography.subheadline)
                         .foregroundStyle(.secondary)
+                    // The Recipients list's short form, so two keys with one name differ.
+                    Text(verbatim: recipient.publicDisplayString())
+                        .font(AgePonyTypography.monoCaption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 Spacer()
             }
@@ -302,11 +322,11 @@ struct RecipientPickerView: View {
     }
 
     private var confirmLabel: String {
-        if useScrypt { return "Use passphrase" }
+        if useScrypt { return String(localized: "Use passphrase") }
         let n = selectedIdentityIDs.count + selectedRecipientIDs.count + adHocRecipients.count
-        if n == 0 { return "Pick at least one recipient" }
-        if n == 1 { return "Use this recipient" }
-        return "Use these \(n) recipients"
+        if n == 0 { return String(localized: "Pick at least one recipient") }
+        if n == 1 { return String(localized: "Use this recipient") }
+        return String(localized: "Use these \(n) recipients")
     }
 
     private var confirmDisabled: Bool {
@@ -363,6 +383,10 @@ struct RecipientPickerView: View {
     }
 
 
+    private func removeAdHoc(_ id: AdHocRecipient.ID) {
+        adHocRecipients.removeAll { $0.id == id }
+    }
+
     private enum AdHocParseError: Error {
         case unrecognized
     }
@@ -409,11 +433,8 @@ struct RecipientPickerView: View {
 
     private func readable(_ error: Error) -> String {
         if error is AdHocParseError {
-            return "Couldn't recognize that. Expected an `age1...` recipient or a one-line `ssh-* AAAA…` public key."
+            return String(localized: "Couldn't recognize that. Expected an age1… recipient or a one-line ssh- public key.")
         }
-        if let e = error as? Bech32Error {
-            return "That doesn't look like a valid age recipient string. (\(e))"
-        }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "That isn't a recipient AgePony can use. Paste an age1 recipient or a one-line SSH public key."))
     }
 }

@@ -101,14 +101,14 @@ public enum FileVerifier {
             let data = try Data(contentsOf: signatureURL)
             guard let text = String(data: data, encoding: .utf8) else {
                 return FileVerificationResult(
-                    trust: .invalid(reason: "That doesn't look like an SSH signature."),
+                    trust: .invalid(reason: String(localized: "That doesn't look like an SSH signature.")),
                     signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
                 )
             }
             signatureText = text
         } catch {
             return FileVerificationResult(
-                trust: .invalid(reason: "Couldn't read the signature: \(error.localizedDescription)"),
+                trust: .invalid(reason: UserMessage.text(for: error, fallback: String(localized: "Couldn't read the signature file."))),
                 signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
             )
         }
@@ -148,8 +148,8 @@ public enum FileVerifier {
         ).with(note: bundle.nameCovered ? nil : v1BundleNote)
     }
 
-    static let v1BundleNote = "Older signature format (v1): it covers the contents but not the file name."
-    static let v1StanzaNote = "Older signature format (v1): it covers the contents but not who the file was encrypted to."
+    static let v1BundleNote = String(localized: "Older signature format (v1): it covers the contents but not the file name.")
+    static let v1StanzaNote = String(localized: "Older signature format (v1): it covers the contents but not who the file was encrypted to.")
 
     /// Verify a file's `agepony.com/sig` stanza (5.0.1) against the plaintext already
     /// written to `plaintextURL`, which is read again to hash it. Nil when the file
@@ -166,8 +166,10 @@ public enum FileVerifier {
         case .absent:
             return nil
         case .unreadable(let why):
+            // `why` is AgePonyCore's English detail; the screen gets a plain sentence.
+            _ = why
             return FileVerificationResult(
-                trust: .invalid(reason: "The file carries a signature that can't be read (\(why))."),
+                trust: .invalid(reason: String(localized: "The file carries a signature that can't be read. It may be damaged, or made by a newer version of AgePony.")),
                 signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
             )
         case .opened(let opened):
@@ -225,12 +227,12 @@ public enum FileVerifier {
         } catch let e as FileSignerError {
             if case .readFailed(let m) = e {
                 return FileVerificationResult(
-                    trust: .invalid(reason: "Couldn't read the file: \(m)"),
+                    trust: .invalid(reason: m),
                     signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
                 )
             }
             return FileVerificationResult(
-                trust: .invalid(reason: "Couldn't verify the signature."),
+                trust: .invalid(reason: UserMessage.text(for: e, fallback: String(localized: "Couldn't verify the signature."))),
                 signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
             )
         } catch let e as SSHSigError {
@@ -240,7 +242,7 @@ public enum FileVerifier {
             )
         } catch {
             return FileVerificationResult(
-                trust: .invalid(reason: "Couldn't verify the signature."),
+                trust: .invalid(reason: UserMessage.text(for: error, fallback: String(localized: "Couldn't verify the signature."))),
                 signerKeyType: nil, signerFingerprint: nil, signerPublicKeyWire: nil, namespace: nil
             )
         }
@@ -266,8 +268,8 @@ public enum FileVerifier {
                 return outcome(.trusted(signerName: s.name, isOwnIdentity: false), result, fingerprint)
             }
             let reason = result.userPresent == false
-                ? "The security key signed without a touch, and this signer requires one."
-                : "The signature doesn't meet this signer's rules."
+                ? String(localized: "The security key signed without a touch, and this signer requires one.")
+                : String(localized: "The signature doesn't meet this signer's rules.")
             return outcome(.validUnknownKey, result, fingerprint, untrustedSignerName: s.name, untrustedReason: reason)
         }
 
@@ -320,15 +322,15 @@ public enum FileVerifier {
     private static func reason(for error: SSHSigError) -> String {
         switch error {
         case .namespaceMismatch(_, let found):
-            return "This signature is for the \"\(found)\" namespace, not AgePony's. AgePony only verifies signatures made in its own namespace."
+            return String(localized: "This signature is for the \"\(found)\" namespace, not AgePony's. AgePony only verifies signatures made in its own namespace.")
         case .signatureInvalid:
-            return "The signature doesn't match this file. The file may have changed, or the file and signature don't go together."
+            return String(localized: "The signature doesn't match this file. The file may have changed, or the file and signature don't go together.")
         case .unsupportedKeyType:
-            return "This signature uses a key type AgePony can't verify yet."
+            return String(localized: "This signature uses a key type AgePony can't verify yet.")
         case .missingBeginMarker, .missingEndMarker, .invalidBase64, .badMagic, .malformedBlob, .extraDataOutsideArmor:
-            return "That doesn't look like an SSH signature."
+            return String(localized: "That doesn't look like an SSH signature.")
         default:
-            return "Couldn't verify the signature."
+            return UserMessage.text(for: error, fallback: String(localized: "Couldn't verify the signature."))
         }
     }
 }

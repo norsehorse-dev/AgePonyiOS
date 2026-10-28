@@ -93,11 +93,15 @@ public struct HybridRecipient: LabeledAgeRecipient {
 ///
 /// The ML-KEM and X25519 keys are both derived deterministically from the seed, so
 /// the seed alone is the whole backup.
+///
+/// 5.1.0 RC3 (E8): on iOS 26 / macOS 26 the key is CryptoKit's X-Wing key built from
+/// the same seed, and the HPKE open runs in CryptoKit; earlier, the own code. The stanza
+/// checks in `unwrap` are the same for both (HybridKEMBackend.swift).
 public struct HybridIdentity: AgeIdentity {
     /// The 32-byte identity seed.
     public let seed: Data
 
-    private let key: HpkeMlkem768X25519.PrivateKey
+    private let key: any XWingDecryptionKey
 
     /// The 1216-byte hybrid public key.
     public var publicKey: Data { key.publicKey }
@@ -107,8 +111,11 @@ public struct HybridIdentity: AgeIdentity {
             throw HybridStanzaError.invalidSeedLength
         }
         self.seed = seed
-        self.key = try HpkeMlkem768X25519.PrivateKey(seed: seed)
+        self.key = try HybridKEMBackend.xwingKey(seed: seed)
     }
+
+    /// Whether this identity opens stanzas with CryptoKit (tests).
+    var usesCryptoKit: Bool { !(key is HpkeMlkem768X25519.PrivateKey) }
 
     /// Parse an `AGE-SECRET-KEY-PQ-1…` identity string (case-insensitive per BIP-0173).
     public init(ageIdentity: String) throws {
@@ -143,13 +150,11 @@ public struct HybridIdentity: AgeIdentity {
         guard enc.count == HpkeMlkem768X25519.encSize else { return nil }
         guard stanza.body.count == hybridBodySize else { return nil }
 
+        // Everything above is AgePony's and runs before either backend sees the bytes.
         do {
-            return try HpkeMlkem768X25519.open(
-                priv: key,
-                enc: enc,
-                info: Data(hybridInfo.utf8),
-                ciphertext: stanza.body
-            )
+            let fileKey = try key.open(enc: enc, info: Data(hybridInfo.utf8), ciphertext: stanza.body)
+            guard fileKey.count == 16 else { return nil }
+            return fileKey
         } catch {
             // Not our stanza, or authentication failed. Same as X25519: a failing
             // tag means "not for me", not a corrupt file.

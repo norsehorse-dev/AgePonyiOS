@@ -44,8 +44,14 @@ struct VerifyFileView: View {
             .navigationTitle("Verify a file")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                if stage == .result {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                } else {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
                 }
             }
             .fileImporter(
@@ -54,14 +60,6 @@ struct VerifyFileView: View {
                 allowsMultipleSelection: false
             ) { res in
                 handleImport(res)
-            }
-            .alert(
-                "Verify failed",
-                isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-            ) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
             }
             .sheet(isPresented: $showAddSigner) {
                 if let prefill = signerPrefill {
@@ -126,6 +124,12 @@ struct VerifyFileView: View {
                 Text("Pick the file and the detached signature that came with it. AgePony checks that the signature matches the file and tells you who signed it.")
             }
 
+            if let errorMessage {
+                Section {
+                    StatusText(errorMessage)
+                }
+            }
+
             Section {
                 Button(action: startVerify) {
                     Text("Verify")
@@ -137,25 +141,32 @@ struct VerifyFileView: View {
                 .disabled(fileURL == nil || signatureURL == nil)
             }
         }
+        .textCase(nil)
     }
 
-    private func inputRow(title: String, placeholder: String, url: URL?, target: ImportTarget) -> some View {
+    private func inputRow(title: LocalizedStringKey, placeholder: LocalizedStringKey, url: URL?, target: ImportTarget) -> some View {
         Button {
             importTarget = target
             showImporter = true
         } label: {
             HStack {
                 Image(systemName: url == nil ? "doc.badge.plus" : "doc")
-                    .foregroundStyle(AgePonyColors.tealCore)
-                VStack(alignment: .leading, spacing: 2) {
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(AgePonyTypography.bodyEmph)
+                        .font(AgePonyTypography.body)
                         .foregroundStyle(.primary)
-                    Text(url?.lastPathComponent ?? placeholder)
-                        .font(AgePonyTypography.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Group {
+                        if let url {
+                            Text(url.lastPathComponent)
+                        } else {
+                            Text(placeholder)
+                        }
+                    }
+                    .font(AgePonyTypography.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
@@ -166,11 +177,10 @@ struct VerifyFileView: View {
     }
 
     private var verifyingStage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Spacer()
             ProgressView()
                 .controlSize(.large)
-                .tint(AgePonyColors.tealCore)
             Text("Verifying…")
                 .font(AgePonyTypography.headline)
                 .foregroundStyle(.secondary)
@@ -179,37 +189,44 @@ struct VerifyFileView: View {
     }
 
     private var resultStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
+        Form {
             if let result {
-                VerifiedBadge(result: result)
+                Section {
+                    VerifiedBadge(result: result)
+                } header: {
+                    Text("Signature")
+                }
             }
-            Spacer()
-            VStack(spacing: 12) {
+            Section {
+                if let fileURL {
+                    LabeledContent("File") {
+                        Text(fileURL.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                if let signatureURL {
+                    LabeledContent("Signature file") {
+                        Text(signatureURL.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+            Section {
                 if canAddSigner {
                     Button("Add as trusted signer") {
                         showAddSigner = true
                     }
-                    .buttonStyle(.agePonyPrimary)
-                    Button("Verify another") {
-                        resetForAnother()
-                    }
-                    .buttonStyle(.agePonySecondary)
-                } else {
-                    Button("Verify another") {
-                        resetForAnother()
-                    }
-                    .buttonStyle(.agePonyPrimary)
                 }
-                Button("Done") {
-                    dismiss()
+                Button("Verify another file") {
+                    resetForAnother()
                 }
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
         }
+        .textCase(nil)
     }
 
     // MARK: - Actions
@@ -223,12 +240,13 @@ struct VerifyFileView: View {
             case .signature: signatureURL = url
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't open the file you picked."))
         }
     }
 
     private func startVerify() {
         guard let fileURL, let signatureURL else { return }
+        errorMessage = nil
         stage = .verifying
         let identities = vault.identities
         let recipients = vault.recipients

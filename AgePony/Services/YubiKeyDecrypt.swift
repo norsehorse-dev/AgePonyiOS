@@ -4,10 +4,13 @@
 //
 //  YubiKey (age-plugin-yubikey) keys over NFC (5.0.1). Two jobs, one tap each:
 //
-//    - On import, read the public key the stub points at and check it belongs.
+//    - On import, read the public key the stub points at and check it belongs,
+//      and the slot's PIN policy (GET METADATA, 5.1.0).
 //    - On decrypt, run the ECDHs the file's header needs. The age code is
 //      synchronous and NFC isn't, so the tap happens first and the results go
-//      into a `RecordedKeyAgreement`; the decrypt then runs as usual.
+//      into a `RecordedKeyAgreement`; the decrypt then runs as usual. Whether the
+//      PIN is asked for before the tap is decided in `DecryptIdentities.prepare`
+//      from the identity's stored PIN policy (5.1.0 item 1).
 //
 //  The tap is only asked for when the file is addressed to a YubiKey in the vault
 //  (tag match first) and nothing else in the vault can open it, so a file with a
@@ -49,19 +52,32 @@ enum YubiKeyDecrypt {
         return nil
     }
 
-    /// Tap the YubiKey and build the identity that opens the file.
-    static func identity(for need: Need, pin: String?) async throws -> any AgeIdentity {
-        let results = try await runPiv(alert: "Hold your YubiKey to the top of your iPhone to decrypt.") { card in
-            try PivSession.keyAgreements(card, stub: need.stub, points: need.points, pin: pin)
-        }
-        return try YubiKeyIdentity(stub: need.stub, publicKey: need.identity.publicKeyMaterial,
-                                   keyAgreement: RecordedKeyAgreement(results: results))
+    /// What one decrypt tap gave: the identity that opens the file, and the slot's PIN
+    /// policy when the tap read it (`.unknown` otherwise).
+    struct Tapped {
+        let identity: any AgeIdentity
+        let pinPolicy: YubiKeyPINPolicy
     }
 
-    /// Tap the YubiKey and read the public key in the stub's slot.
-    static func readKey(stub: YubiKeyStub) async throws -> Data {
+    /// Tap the YubiKey and build the identity that opens the file. With `pin`, VERIFY
+    /// runs first in the same tap. `readPINPolicy` also sends GET METADATA, for a key
+    /// whose policy isn't known yet; a failed read leaves it `.unknown`.
+    static func identity(for need: Need, pin: String?, readPINPolicy: Bool) async throws -> Tapped {
+        let (results, policy) = try await runPiv(alert: "Hold your YubiKey to the top of your iPhone to decrypt.") { (card: PivCard) -> ([Data: Data], YubiKeyPINPolicy) in
+            let results = try PivSession.keyAgreements(card, stub: need.stub, points: need.points, pin: pin)
+            let policy = readPINPolicy ? ((try? Piv.pinPolicy(card, slot: need.stub.slot)) ?? .unknown) : .unknown
+            return (results, policy)
+        }
+        let identity = try YubiKeyIdentity(stub: need.stub, publicKey: need.identity.publicKeyMaterial,
+                                           keyAgreement: RecordedKeyAgreement(results: results))
+        return Tapped(identity: identity, pinPolicy: policy)
+    }
+
+    /// Tap the YubiKey and read the public key in the stub's slot, plus the slot's PIN
+    /// policy (`.unknown` on firmware before 5.3).
+    static func readKey(stub: YubiKeyStub) async throws -> (key: Data, pinPolicy: YubiKeyPINPolicy) {
         try await runPiv(alert: "Hold your YubiKey to the top of your iPhone to read its key.") { card in
-            try PivSession.readKey(card, stub: stub)
+            try PivSession.readKeyAndPINPolicy(card, stub: stub)
         }
     }
 
@@ -78,35 +94,10 @@ enum YubiKeyDecrypt {
         return false
     }
 
-    /// Words for an error from either of the above.
+    /// Words for an error from either of the above. The PIV, YubiKey and NFC
+    /// mappings live in `UserMessage` with every other error (5.1.0, U5).
     static func message(for error: Error) -> String {
-        if let e = error as? PivError {
-            switch e {
-            case .pinRequired:            return "This YubiKey key needs its PIN."
-            case .wrongPIN(let left) where left == 0:
-                return "The PIV PIN is blocked. Unblock it with the PUK in YubiKey Manager."
-            case .wrongPIN(let left):     return "Wrong PIN. \(left) \(left == 1 ? "try" : "tries") left before it locks."
-            case .pinLength:              return "A YubiKey PIN is 6 to 8 characters."
-            case .notPIV:                 return "That key has no PIV applet."
-            case .noKeyInSlot:            return "That YubiKey has no key in the slot this identity uses."
-            case .notP256:                return "The key in that slot isn't a P-256 key."
-            case .refused(let sw):        return String(format: "The YubiKey refused (status %04X).", sw)
-            case .malformedResponse(let m): return "The YubiKey's answer didn't make sense: \(m)"
-            }
-        }
-        if let e = error as? YubiKeyError {
-            switch e {
-            case .wrongYubiKey(let expected, let found):
-                return "That's YubiKey \(found). This identity is on YubiKey \(expected)."
-            case .keyDoesNotMatchStub:    return "The key in that slot isn't the one this identity points at."
-            case .notAStub, .malformedStub: return "That isn't an age-plugin-yubikey identity (AGE-PLUGIN-YUBIKEY-1…)."
-            case .notARetiredSlot:        return "That identity points at a slot age-plugin-yubikey doesn't use."
-            }
-        }
-        #if canImport(CoreNFC)
-        if let e = error as? SecurityKeyError { return e.errorDescription ?? "The YubiKey couldn't be read." }
-        #endif
-        return error.localizedDescription
+        UserMessage.text(for: error, fallback: String(localized: "The YubiKey couldn't be read."))
     }
 
     // MARK: - Transport

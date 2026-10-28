@@ -12,22 +12,18 @@ import SwiftUI
 struct RecipientListView: View {
 
     let vault: Vault
+    /// Opens Add recipient (the empty state's action).
+    var onAdd: () -> Void = {}
 
     var body: some View {
         if vault.recipients.isEmpty {
-            VStack(spacing: 14) {
-                Spacer()
-                Image(systemName: "person.2.crop.square.stack")
-                    .font(.system(size: 44, weight: .light))
-                    .foregroundStyle(.secondary)
-                Text("No recipients yet")
-                    .font(AgePonyTypography.headline)
-                Text("Tap + to add one.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
-                Spacer()
+            ContentUnavailableView {
+                Label("No recipients", systemImage: "person.2")
+            } description: {
+                Text("A recipient is someone else's public key. Add theirs to encrypt files only they can open. Paste it, scan their QR code or fetch it from GitHub.")
+            } actions: {
+                Button("Add recipient", action: onAdd)
             }
-            .frame(maxWidth: .infinity)
         } else {
             List {
                 ForEach(groupedSections, id: \.title) { section in
@@ -47,6 +43,7 @@ struct RecipientListView: View {
                     }
                 }
             }
+            .textCase(nil)
             .listStyle(.insetGrouped)
             .navigationDestination(for: StoredRecipient.self) { r in
                 RecipientDetailView(vault: vault, recipientID: r.id)
@@ -73,23 +70,18 @@ private struct RecipientRow: View {
     var body: some View {
         HStack(spacing: 12) {
             KeyAvatarView(seed: recipient.publicKeyMaterial.base64EncodedString(),
-                          name: recipient.name, size: 34)
+                          name: recipient.name, size: 36)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(recipient.name)
-                    .font(AgePonyTypography.bodyEmph)
-                HStack(spacing: 6) {
+                    .font(AgePonyTypography.body)
+                HStack(spacing: 8) {
                     if recipient.type == .postQuantum || recipient.type == .tagPQ {
                         PostQuantumBadge(compact: true)
                     }
                     Text(sourceLabel)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(AgePonyColors.tealCore)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule().fill(AgePonyColors.tealCore.opacity(0.12))
-                        )
+                        .font(AgePonyTypography.footnote)
+                        .foregroundStyle(.secondary)
                     Text(shortPublic)
                         .font(AgePonyTypography.monoCaption)
                         .foregroundStyle(.secondary)
@@ -103,12 +95,12 @@ private struct RecipientRow: View {
 
     private var sourceLabel: String {
         switch recipient.source {
-        case .pasteAge:          return "PASTE"
-        case .pasteSSH:          return "PASTE"
-        case .qrScan:            return "QR"
-        case .github:            return "GITHUB"
-        case .contacts:          return "CONTACTS"
-        case .derivedFromIdentity: return "SELF"
+        case .pasteAge:          return String(localized: "Pasted")
+        case .pasteSSH:          return String(localized: "Pasted")
+        case .qrScan:            return String(localized: "QR code")
+        case .github:            return String(localized: "GitHub")
+        case .contacts:          return String(localized: "Contacts")
+        case .derivedFromIdentity: return String(localized: "Your identity")
         }
     }
 

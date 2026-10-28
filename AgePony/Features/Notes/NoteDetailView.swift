@@ -51,19 +51,11 @@ struct NoteDetailView: View {
                 unlockedView
             }
         }
-        .navigationTitle(note?.title ?? "Note")
+        .navigationTitle(note?.title ?? String(localized: "Note"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .alert(
-            "Save failed",
-            isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })
-        ) {
-            Button("OK", role: .cancel) { saveError = nil }
-        } message: {
-            Text(saveError ?? "")
-        }
         .confirmationDialog(
-            "Delete \"\(note?.title ?? "this note")\"?",
+            "Delete \"\(note?.title ?? String(localized: "this note"))\"?",
             isPresented: $pendingDelete,
             titleVisibility: .visible
         ) {
@@ -85,7 +77,7 @@ struct NoteDetailView: View {
                 Button {
                     lockNote()
                 } label: {
-                    Image(systemName: "lock.fill")
+                    Label("Lock note", systemImage: "lock.fill")
                 }
                 .disabled(working)
             }
@@ -97,14 +89,20 @@ struct NoteDetailView: View {
             Section {
                 HStack(spacing: 12) {
                     Image(systemName: "lock.doc.fill")
-                        .foregroundStyle(AgePonyColors.tealCore)
-                        .font(.system(size: 22))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(note?.title ?? "Note")
-                            .font(AgePonyTypography.bodyEmph)
+                        .foregroundStyle(.secondary)
+                        .font(AgePonyTypography.title)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Group {
+                            if let title = note?.title {
+                                Text(title)
+                            } else {
+                                Text("Note")
+                            }
+                        }
+                        .font(AgePonyTypography.body)
                         if let n = note {
-                            Text("Edited " + relativeDate(n.updatedAt))
-                                .font(AgePonyTypography.caption)
+                            Text("Edited \(relativeDate(n.updatedAt))")
+                                .font(AgePonyTypography.subheadline)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -116,9 +114,8 @@ struct NoteDetailView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 if let msg = passphraseError {
-                    Text(msg)
-                        .font(AgePonyTypography.caption)
-                        .foregroundStyle(AgePonyColors.destructive)
+                    StatusText(msg)
+                        .font(AgePonyTypography.footnote)
                 }
             } header: {
                 Text("Unlock")
@@ -154,6 +151,7 @@ struct NoteDetailView: View {
                 Text("Deleting doesn't require the passphrase, but is permanent.")
             }
         }
+        .textCase(nil)
     }
 
     private var unlockedView: some View {
@@ -175,8 +173,7 @@ struct NoteDetailView: View {
                 Text("Body")
             } footer: {
                 if hasUnsavedChanges {
-                    Text("Unsaved changes — tap Save to re-encrypt and store.")
-                        .foregroundStyle(AgePonyColors.destructive)
+                    Text("Unsaved changes. Tap Save to encrypt and store them.")
                 } else {
                     Text("Saved.")
                         .foregroundStyle(.secondary)
@@ -201,6 +198,12 @@ struct NoteDetailView: View {
                 .disabled(!hasUnsavedChanges || working)
             }
 
+            if let saveError {
+                Section {
+                    StatusText(saveError)
+                }
+            }
+
             Section {
                 Button(role: .destructive) {
                     pendingDelete = true
@@ -209,6 +212,7 @@ struct NoteDetailView: View {
                 }
             }
         }
+        .textCase(nil)
     }
 
     private var hasUnsavedChanges: Bool {
@@ -248,10 +252,11 @@ struct NoteDetailView: View {
 
     private func save() {
         guard let note, !unlockedPassphrase.isEmpty else { return }
+        saveError = nil
         working = true
         let bodyData = Data(editingBody.utf8)
         let titleSnapshot = editingTitle.trimmingCharacters(in: .whitespaces).isEmpty
-            ? "Untitled"
+            ? String(localized: "Untitled")
             : editingTitle.trimmingCharacters(in: .whitespaces)
         let pphr = unlockedPassphrase
         let existingID = note.id
@@ -277,13 +282,13 @@ struct NoteDetailView: View {
                         editingTitle = titleSnapshot
                         working = false
                     } catch {
-                        saveError = error.localizedDescription
+                        saveError = UserMessage.text(for: error, fallback: String(localized: "Couldn't save the note to the vault."))
                         working = false
                     }
                 }
             } catch {
                 DispatchQueue.main.async {
-                    saveError = String(describing: error)
+                    saveError = UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the note."))
                     working = false
                 }
             }
@@ -302,14 +307,17 @@ struct NoteDetailView: View {
     }
 
     private func describeUnlockError(_ error: Error) -> String {
-        let s = String(describing: error)
-        if s.contains("wrongPassphrase") || s.contains("noMatchingIdentity") {
-            return "Wrong passphrase."
+        if let e = error as? AgeError {
+            switch e {
+            case .wrongPassphrase, .noMatchingIdentity:
+                return String(localized: "Wrong passphrase.")
+            case .headerError, .payloadError:
+                return String(localized: "The note's encrypted data is damaged.")
+            default:
+                break
+            }
         }
-        if s.contains("headerError") || s.contains("payloadError") {
-            return "The note's encrypted data is malformed."
-        }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't open the note."))
     }
 
     private func relativeDate(_ date: Date) -> String {

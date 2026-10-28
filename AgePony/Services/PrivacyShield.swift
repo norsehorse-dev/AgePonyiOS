@@ -79,12 +79,10 @@ final class PrivacyShield {
 /// The neutral screen the shield shows.
 struct PrivacyCoverView: View {
     var body: some View {
-        ZStack {
-            AgePonyColors.brandGradient.ignoresSafeArea()
-            Image(systemName: "shield.lefthalf.filled")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(.white)
-        }
+        // A plain system background (5.1.0, U4): nothing to read in the app
+        // switcher, and no decorative symbol.
+        Color(.systemBackground)
+            .ignoresSafeArea()
         .accessibilityLabel("AgePony is hidden")
     }
 }

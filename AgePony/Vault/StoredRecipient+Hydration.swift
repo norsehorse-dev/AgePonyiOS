@@ -61,7 +61,7 @@ public extension StoredRecipient {
         case .yubikey:
             return Bech32.encodeYubiKeyRecipient(Array(publicKeyMaterial))
         case .tag, .tagPQ:
-            return (try? TagRecipient(publicKey: publicKeyMaterial).toBech32()) ?? "(invalid hardware key)"
+            return (try? TagRecipient(publicKey: publicKeyMaterial).toBech32()) ?? String(localized: "(invalid hardware key)")
         }
     }
 

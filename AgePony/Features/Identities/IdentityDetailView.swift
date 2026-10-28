@@ -19,6 +19,8 @@ struct IdentityDetailView: View {
     @State private var renameDraft: String = ""
     @State private var privateRevealed: Bool = false
     @State private var revealError: String?
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     @State private var pendingDelete: Bool = false
 
     @Environment(\.dismiss) private var dismiss
@@ -32,28 +34,10 @@ struct IdentityDetailView: View {
             if let identity {
                 Form {
                     Section {
-                        HStack {
-                            Text("Name")
-                            Spacer()
-                            Text(identity.name).foregroundStyle(.secondary)
-                            Button {
-                                renameDraft = identity.name
-                                renaming = true
-                            } label: {
-                                Image(systemName: "pencil")
-                            }
-                        }
-                        HStack {
-                            Text("Type")
-                            Spacer()
-                            Text(typeLabel(identity.type))
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Created")
-                            Spacer()
+                        LabeledContent("Name", value: identity.name)
+                        LabeledContent("Type", value: typeLabel(identity.type))
+                        LabeledContent("Created") {
                             Text(identity.createdAt, style: .date)
-                                .foregroundStyle(.secondary)
                         }
                     }
 
@@ -78,8 +62,17 @@ struct IdentityDetailView: View {
                         }
                     } else if identity.isHardwareDecryptionKey {
                         Section {
-                            Label("The private key is inside this iPhone's Secure Enclave. It can't be shown, exported, transferred or backed up, and it's gone if this iPhone is erased or replaced.", systemImage: "cpu")
-                                .font(AgePonyTypography.footnote)
+                            if identity.type == .secureEnclaveTagPQ && !identity.mlkemInSecureEnclave {
+                                // 5.0.1 layout, or made below iOS 26 (5.1.0 RC3).
+                                Label("The P-256 half of this key is inside this iPhone's Secure Enclave and the ML-KEM half is in the encrypted vault. A file needs both. Neither can be shown, exported, transferred or backed up, and the key is gone if this iPhone is erased or replaced.", systemImage: "cpu")
+                                    .font(AgePonyTypography.subheadline)
+                            } else if identity.type == .secureEnclaveTagPQ {
+                                Label("Both halves of this key, P-256 and ML-KEM, are inside this iPhone's Secure Enclave. It can't be shown, exported, transferred or backed up, and it's gone if this iPhone is erased or replaced.", systemImage: "cpu")
+                                    .font(AgePonyTypography.subheadline)
+                            } else {
+                                Label("The private key is inside this iPhone's Secure Enclave. It can't be shown, exported, transferred or backed up, and it's gone if this iPhone is erased or replaced.", systemImage: "cpu")
+                                    .font(AgePonyTypography.subheadline)
+                            }
                         }
                     } else {
                     Section {
@@ -92,15 +85,15 @@ struct IdentityDetailView: View {
                             Button("Hide private key") {
                                 privateRevealed = false
                             }
-                            .foregroundStyle(AgePonyColors.tealCore)
                         } else {
                             Button {
                                 revealPrivate()
                             } label: {
                                 Label("Reveal private key", systemImage: "eye")
-                                    .font(AgePonyTypography.body)
                             }
-                            .foregroundStyle(AgePonyColors.tealCore)
+                        }
+                        if let revealError {
+                            StatusText(revealError)
                         }
                     } footer: {
                         Text("Revealing the private key requires Face ID, Touch ID, or your device passcode.")
@@ -124,7 +117,6 @@ struct IdentityDetailView: View {
                             Button("Set as active identity") {
                                 vault.activeIdentityID = identity.id
                             }
-                            .foregroundStyle(AgePonyColors.tealCore)
                         } footer: {
                             Text("The active identity is used as your default \"encrypt-to-self\" recipient.")
                         }
@@ -140,6 +132,7 @@ struct IdentityDetailView: View {
                         Text("Files encrypted to this identity will no longer be decryptable on this device.")
                     }
                 }
+                .textCase(nil)
             } else {
                 ContentUnavailableView(
                     "Identity not found",
@@ -147,8 +140,20 @@ struct IdentityDetailView: View {
                 )
             }
         }
-        .navigationTitle(identity?.name ?? "Identity")
+        .ownerCheck(ownerCheck, vault: vault)
+        .navigationTitle(identity?.name ?? String(localized: "Identity"))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // A text button in the bar, not a pencil inside the row (5.1.0, U4).
+            if let identity {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Rename") {
+                        renameDraft = identity.name
+                        renaming = true
+                    }
+                }
+            }
+        }
         .alert("Rename identity", isPresented: $renaming) {
             TextField("Name", text: $renameDraft)
             Button("Cancel", role: .cancel) {}
@@ -158,16 +163,8 @@ struct IdentityDetailView: View {
                 try? vault.renameIdentity(id: identityID, to: trimmed)
             }
         }
-        .alert(
-            "Couldn't reveal private key",
-            isPresented: Binding(get: { revealError != nil }, set: { if !$0 { revealError = nil } })
-        ) {
-            Button("OK", role: .cancel) { revealError = nil }
-        } message: {
-            Text(revealError ?? "")
-        }
         .confirmationDialog(
-            "Delete \"\(identity?.name ?? "this identity")\"?",
+            "Delete \"\(identity?.name ?? String(localized: "this identity"))\"?",
             isPresented: $pendingDelete,
             titleVisibility: .visible
         ) {
@@ -180,14 +177,15 @@ struct IdentityDetailView: View {
     }
 
     private func revealPrivate() {
+        revealError = nil
         Task {
             do {
-                try await BiometricGate.authenticate(reason: "Reveal the private key for this identity.")
+                try await ownerCheck.authenticate(vault, reason: String(localized: "Reveal the private key for this identity."))
                 privateRevealed = true
             } catch BiometricGateError.userCancelled {
-                // Silent — user backed out.
+                // Silent: the user backed out.
             } catch {
-                revealError = error.localizedDescription
+                revealError = UserMessage.text(for: error, fallback: String(localized: "Couldn't confirm it's you, so the private key stays hidden."))
             }
         }
     }

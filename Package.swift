@@ -40,7 +40,9 @@ let package = Package(
         .testTarget(
             name: "AgePonyCoreTests",
             dependencies: ["AgePonyCore"],
-            path: "Tests/AgePonyCoreTests"
+            path: "Tests/AgePonyCoreTests",
+            // C2SP CCTV age test vectors, read by CCTVTestkitTests via Bundle.module.
+            resources: [.copy("Testkit")]
         ),
     ]
 )

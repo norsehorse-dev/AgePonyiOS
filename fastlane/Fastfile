@@ -58,6 +58,54 @@ platform :ios do
     UI.success("Deleted #{deleted} screenshots")
   end
 
+  desc "Write the live App Store listing text, every locale, into fastlane/metadata_live (read only, nothing uploaded)"
+  lane :pull_metadata do
+    asc_api_key
+    app = Spaceship::ConnectAPI::App.find("com.agepony.app")
+    version = app.get_live_app_store_version(platform: Spaceship::ConnectAPI::Platform::IOS)
+    root = File.expand_path("metadata_live")
+    locales = []
+    version.get_app_store_version_localizations.each do |loc|
+      dir = File.join(root, loc.locale)
+      FileUtils.mkdir_p(dir)
+      {
+        "description" => loc.description,
+        "keywords" => loc.keywords,
+        "promotional_text" => loc.promotional_text,
+        "release_notes" => loc.whats_new
+      }.each { |name, text| File.write(File.join(dir, "#{name}.txt"), text.to_s) }
+      locales << loc.locale
+    end
+    UI.success("Live version #{version.version_string}, #{locales.count} locales: #{locales.sort.join(', ')}")
+  end
+
+  desc "Upload only What's New and promotional text, every locale in fastlane/metadata. No screenshots, no other fields, no binary, no submission. Usage: fastlane whats_new version:5.1.0"
+  lane :whats_new do |options|
+    version = options[:version] || UI.user_error!("pass version:, e.g. fastlane whats_new version:5.1.0")
+    require "tmpdir"
+    staged = Dir.mktmpdir("agepony-whats-new")
+    Dir.glob(File.expand_path("metadata/*/release_notes.txt")).each do |notes|
+      dir = File.dirname(notes)
+      out = File.join(staged, File.basename(dir))
+      FileUtils.mkdir_p(out)
+      FileUtils.cp(notes, out)
+      promo = File.join(dir, "promotional_text.txt")
+      FileUtils.cp(promo, out) if File.exist?(promo)
+    end
+    UI.message("Uploading What's New and promotional text for: #{Dir.children(staged).sort.join(', ')}")
+    asc_api_key
+    deliver(
+      app_version: version,
+      metadata_path: staged,
+      skip_binary_upload: true,
+      skip_screenshots: true,
+      submit_for_review: false,
+      force: true,
+      run_precheck_before_submit: false,
+      precheck_include_in_app_purchases: false
+    )
+  end
+
   desc "Make the App Store screenshots exactly match fastlane/screenshots, touching neither metadata nor the binary"
   lane :fix_screenshots do
     asc_api_key

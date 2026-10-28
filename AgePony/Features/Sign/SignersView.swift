@@ -21,7 +21,10 @@ struct SignersView: View {
     @State private var showImporter: Bool = false
     @State private var pendingDelete: StoredSigner?
     @State private var importSummary: String?
+    /// Whether `importSummary` reports a failure, for the alert's title.
+    @State private var importFailed: Bool = false
     @State private var exportURL: URL?
+    @Environment(\.editMode) private var editMode
 
     var body: some View {
         Group {
@@ -33,8 +36,17 @@ struct SignersView: View {
         }
         .navigationTitle("Trusted signers")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: vault.signers.isEmpty) {
+            // Deleting the last signer in Edit mode leaves nothing to edit.
+            if vault.signers.isEmpty { editMode?.wrappedValue = .inactive }
+        }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                // Edit mode is the visible way to remove signers (5.1.0, U4);
+                // swipe and the row's context menu do the same.
+                if !vault.signers.isEmpty {
+                    EditButton()
+                }
                 Menu {
                     Button {
                         showAddPaste = true
@@ -53,7 +65,7 @@ struct SignersView: View {
                     }
                     .disabled(eligibleRecipients.isEmpty)
                 } label: {
-                    Image(systemName: "plus")
+                    Label("Add signer", systemImage: "plus")
                 }
             }
         }
@@ -77,7 +89,7 @@ struct SignersView: View {
         .onAppear { regenerateExport() }
         .onChange(of: vault.signers) { _, _ in regenerateExport() }
         .confirmationDialog(
-            pendingDelete.map { "Remove \"\($0.name)\"?" } ?? "",
+            pendingDelete.map { String(localized: "Remove \"\($0.name)\"?") } ?? "",
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             titleVisibility: .visible
         ) {
@@ -90,7 +102,7 @@ struct SignersView: View {
             Text("Their signatures will show as \"valid, unknown signer\" until you add them again.")
         }
         .alert(
-            "Import complete",
+            importFailed ? Text("Couldn't import") : Text("Import complete"),
             isPresented: Binding(get: { importSummary != nil }, set: { if !$0 { importSummary = nil } })
         ) {
             Button("OK", role: .cancel) { importSummary = nil }
@@ -106,13 +118,19 @@ struct SignersView: View {
             Section {
                 ForEach(vault.signers) { signer in
                     SignerRow(signer: signer)
-                        .swipeActions(edge: .trailing) {
+                        .contextMenu {
                             Button(role: .destructive) {
                                 pendingDelete = signer
                             } label: {
                                 Label("Remove", systemImage: "trash")
                             }
                         }
+                }
+                .onDelete { offsets in
+                    // Swipe or Edit mode: ask first, like the context menu.
+                    if let index = offsets.first, vault.signers.indices.contains(index) {
+                        pendingDelete = vault.signers[index]
+                    }
                 }
             } footer: {
                 Text("These keys are trusted to sign. When a file's signature matches one, it verifies as signed by that name.")
@@ -128,25 +146,20 @@ struct SignersView: View {
                 }
             }
         }
+        .textCase(nil)
         .listStyle(.insetGrouped)
     }
 
+    /// The one empty-state pattern (5.1.0, U4): what a trusted signer is and how to add one.
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Image(systemName: "person.badge.shield.checkmark")
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("No trusted signers yet")
-                .font(AgePonyTypography.headline)
-            Text("Add a signer's public key so their signatures verify with a name. Tap + to paste a key, import an allowed_signers file, or promote a recipient.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
+        ContentUnavailableView {
+            Label("No trusted signers", systemImage: "person.badge.shield.checkmark")
+        } description: {
+            Text("A trusted signer is someone's SSH public key you've chosen to trust. Signatures made with it verify with their name. Paste a key, import an allowed_signers file, or promote a recipient.")
+        } actions: {
+            Button("Paste a public key") { showAddPaste = true }
+            Button("Import allowed_signers") { showImporter = true }
         }
-        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Recipient picker
@@ -158,24 +171,33 @@ struct SignersView: View {
     private var recipientPicker: some View {
         Group {
             if eligibleRecipients.isEmpty {
-                Text("No SSH recipients to promote.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
+                ContentUnavailableView {
+                    Label("No SSH recipients", systemImage: "person.crop.circle")
+                } description: {
+                    Text("Only SSH Ed25519 and RSA recipients can sign. Add one under Recipients on the Identities tab first.")
+                }
             } else {
                 List(eligibleRecipients) { recipient in
                     Button {
                         promote(recipient)
                     } label: {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(recipient.name)
-                                .font(AgePonyTypography.bodyEmph)
+                                .font(AgePonyTypography.body)
                                 .foregroundStyle(.primary)
-                            Text(recipient.type == .sshEd25519 ? "ssh-ed25519" : "ssh-rsa")
+                            Text(recipient.type.sectionTitle)
+                                .font(AgePonyTypography.subheadline)
+                                .foregroundStyle(.secondary)
+                            // The Recipients list's short form, so two keys with one name differ.
+                            Text(verbatim: recipient.publicDisplayString())
                                 .font(AgePonyTypography.monoCaption)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
                     }
                 }
+                .textCase(nil)
             }
         }
         .navigationTitle("From a recipient")
@@ -210,7 +232,8 @@ struct SignersView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url)
             guard let text = String(data: data, encoding: .utf8) else {
-                importSummary = "That file isn't readable as text."
+                importFailed = true
+                importSummary = String(localized: "That file isn't text. An allowed_signers file is plain text with one key per line.")
                 return
             }
             let parsed = AllowedSigners.parse(text)
@@ -221,11 +244,16 @@ struct SignersView: View {
                     added += 1
                 }
             }
-            importSummary = added == 0
-                ? "No signers found in that file."
-                : "Imported \(added) signer\(added == 1 ? "" : "s")."
+            if added == 0 {
+                importFailed = true
+                importSummary = String(localized: "No signers found in that file. Each line should hold a name, a key type and a public key.")
+            } else {
+                importFailed = false
+                importSummary = String(AttributedString(localized: "Imported ^[\(added) signer](inflect: true).").characters)
+            }
         } catch {
-            importSummary = "Couldn't import: \(error.localizedDescription)"
+            importFailed = true
+            importSummary = UserMessage.text(for: error, fallback: String(localized: "Couldn't read the allowed_signers file."))
         }
     }
 
@@ -253,13 +281,13 @@ private struct SignerRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "checkmark.seal")
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
+                .font(AgePonyTypography.body)
+                .foregroundStyle(.secondary)
                 .frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(signer.name)
-                    .font(AgePonyTypography.bodyEmph)
-                Text("\(signer.keyType)  ·  \(signer.fingerprint)")
+                    .font(AgePonyTypography.body)
+                Text(verbatim: "\(signer.keyType)  ·  \(signer.fingerprint)")
                     .font(AgePonyTypography.monoCaption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

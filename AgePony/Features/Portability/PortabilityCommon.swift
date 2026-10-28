@@ -9,6 +9,10 @@
 //  way in (duress set, or no OS lock), otherwise Face ID / Touch ID / the passcode, and the
 //  app password when the phone can do neither.
 //
+//  5.1.0 (E6): `authenticate(_:reason:)` is the same check for the in-app prompts
+//  (decrypt, re-encrypt, sign, reveal). In Face ID only mode, when Face ID can't run
+//  (nothing enrolled, locked out) it asks for the app password; the passcode stays closed.
+//
 
 import SwiftUI
 import UIKit
@@ -29,6 +33,37 @@ final class OwnerCheck {
     var pending: Pending?
     /// Why the check failed, for an alert.
     var error: String?
+    /// The caller of `authenticate` waiting on the password sheet.
+    @ObservationIgnored private var waiting: CheckedContinuation<Bool, Never>?
+
+    /// The in-app prompt (E6): Face ID, Touch ID or the passcode as the lock
+    /// mode allows, and in Face ID only mode the app password when Face ID can't
+    /// run. Throws what `BiometricGate.authenticate` throws; closing the password
+    /// sheet throws `userCancelled`.
+    func authenticate(_ vault: Vault, reason: String) async throws {
+        do {
+            try await BiometricGate.authenticate(reason: reason)
+        } catch BiometricGateError.unavailable {
+            guard BiometricGate.biometryOnly, vault.hasAppPassword else { throw BiometricGateError.unavailable }
+            guard await askPassword(title: reason) else { throw BiometricGateError.userCancelled }
+        }
+    }
+
+    private func askPassword(title: String) async -> Bool {
+        finishWaiting(false)
+        return await withCheckedContinuation { continuation in
+            waiting = continuation
+            pending = Pending(title: title, run: { [weak self] in self?.finishWaiting(true) })
+        }
+    }
+
+    /// Resume a waiting `authenticate`, once. The sheet's dismissal calls this
+    /// with false, which does nothing after a success.
+    func finishWaiting(_ confirmed: Bool) {
+        let continuation = waiting
+        waiting = nil
+        continuation?.resume(returning: confirmed)
+    }
 
     func confirm(_ vault: Vault, title: String, then run: @escaping () -> Void) {
         if vault.hasAppPassword && vault.passwordIsOnlyUnlock {
@@ -50,7 +85,7 @@ final class OwnerCheck {
             } catch BiometricGateError.failed(let message) {
                 error = message
             } catch {
-                self.error = error.localizedDescription
+                self.error = UserMessage.text(for: error, fallback: BiometricGate.didNotConfirmText)
             }
         }
     }
@@ -69,7 +104,7 @@ private struct OwnerCheckModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .sheet(item: $check.pending) { pending in
+            .sheet(item: $check.pending, onDismiss: { check.finishWaiting(false) }) { pending in
                 OwnerPasswordSheet(vault: vault, title: pending.title) {
                     check.pending = nil
                     pending.run()
@@ -97,21 +132,28 @@ private struct OwnerPasswordSheet: View {
     @State private var checking = false
     @State private var message: String?
 
-    private var noun: String { vault.unlockSecretKind == .pin ? "PIN" : "password" }
+    private var noun: String { (vault.unlockSecretKind ?? .password).displayNoun }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    SecureField(noun == "PIN" ? "PIN" : "Password", text: $secret)
-                        .textContentType(.password)
-                        .keyboardType(vault.unlockSecretKind == .pin ? .numberPad : .default)
-                        .onSubmit(check)
+                    Group {
+                        if vault.unlockSecretKind == .pin {
+                            SecureField("PIN", text: $secret)
+                                .keyboardType(.numberPad)
+                        } else {
+                            SecureField("Password", text: $secret)
+                        }
+                    }
+                    .textContentType(.password)
+                    .onSubmit(check)
                 } footer: {
-                    if let message { Text(message).foregroundStyle(.red) }
+                    if let message { StatusText(message) }
                     else { Text(title) }
                 }
             }
+            .textCase(nil)
             .navigationTitle("Confirm your \(noun)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -137,12 +179,12 @@ private struct OwnerPasswordSheet: View {
                 if try await vault.verifyAppPassword(entered) {
                     onSuccess()
                 } else {
-                    message = "Wrong \(noun)."
+                    message = String(localized: "Wrong \(noun).")
                 }
             } catch VaultError.lockedOut(let millis) {
-                message = UnlockAttempts.lockoutMessage(millis: millis)
+                message = UserMessage.lockout(millis: millis)
             } catch {
-                message = "Couldn't check the \(noun)."
+                message = UserMessage.text(for: error, fallback: String(localized: "Couldn't check the \(noun)."))
             }
         }
     }
@@ -152,17 +194,34 @@ private struct OwnerPasswordSheet: View {
 
 /// A tick-box line.
 struct CheckLine: View {
-    let label: String
+    let label: Text
     let checked: Bool
     var enabled: Bool = true
     let onToggle: () -> Void
 
+    /// A label from the string catalog.
+    init(label: LocalizedStringKey, checked: Bool, enabled: Bool = true, onToggle: @escaping () -> Void) {
+        self.label = Text(label)
+        self.checked = checked
+        self.enabled = enabled
+        self.onToggle = onToggle
+    }
+
+    /// A label shown as is, such as a key's name.
+    @_disfavoredOverload
+    init<S: StringProtocol>(label: S, checked: Bool, enabled: Bool = true, onToggle: @escaping () -> Void) {
+        self.label = Text(label)
+        self.checked = checked
+        self.enabled = enabled
+        self.onToggle = onToggle
+    }
+
     var body: some View {
         Button(action: onToggle) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: checked && enabled ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(enabled ? AgePonyColors.tealCore : .secondary)
-                Text(label)
+                    .foregroundStyle(enabled ? AgePonyColors.accent : .secondary)
+                label
                     .foregroundStyle(enabled ? .primary : .secondary)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
@@ -174,7 +233,7 @@ struct CheckLine: View {
     }
 }
 
-/// One line under a preview entry; warnings show in red.
+/// One line under a preview entry; warnings get a warning icon.
 struct PreviewNote: Hashable {
     let text: String
     let warning: Bool
@@ -192,19 +251,28 @@ struct PreviewRow: View {
 
     var body: some View {
         Button(action: onToggle) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: checked && enabled ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(enabled ? AgePonyColors.tealCore : .secondary)
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(AgePonyTypography.bodyEmph)
+                    .foregroundStyle(enabled ? AgePonyColors.accent : .secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(AgePonyTypography.body)
                     Text(detail)
-                        .font(AgePonyTypography.monoCaption)
+                        .font(AgePonyTypography.footnote)
                         .foregroundStyle(.secondary)
                     ForEach(notes, id: \.self) { n in
-                        Text(n.text)
-                            .font(AgePonyTypography.caption)
-                            .foregroundStyle(n.warning ? Color.red : Color.secondary)
+                        if n.warning {
+                            Label {
+                                Text(n.text)
+                            } icon: {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(AgePonyColors.warning)
+                            }
+                            .font(AgePonyTypography.footnote)
+                        } else {
+                            Text(n.text)
+                                .font(AgePonyTypography.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Spacer(minLength: 0)
@@ -219,11 +287,17 @@ struct PreviewRow: View {
 /// A short code in large type, for comparing across two screens.
 struct BigCode: View {
     let code: String
-    var size: CGFloat = 26
+    /// Base point size; scales with Dynamic Type like the title style.
+    @ScaledMetric private var size: CGFloat
+
+    init(code: String, size: CGFloat = 26) {
+        self.code = code
+        _size = ScaledMetric(wrappedValue: size, relativeTo: .title)
+    }
 
     var body: some View {
-        Text(code)
-            .font(.system(size: size, weight: .bold, design: .monospaced))
+        Text(verbatim: code)
+            .font(.system(size: size, weight: .semibold, design: .monospaced))
             .frame(maxWidth: .infinity)
             .textSelection(.disabled)
             .accessibilityLabel(code.map { String($0) }.joined(separator: " "))

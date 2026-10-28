@@ -94,7 +94,7 @@ struct ReceiveKeysView: View {
     var body: some View {
         Form {
             if let error {
-                Section { Text(error).foregroundStyle(.red).font(AgePonyTypography.footnote) }
+                Section { StatusText(error).font(AgePonyTypography.subheadline) }
             }
             switch stage {
             case .waiting, .opening: waitingSections
@@ -103,6 +103,7 @@ struct ReceiveKeysView: View {
             case .expired: expiredSection
             }
         }
+        .textCase(nil)
         .navigationTitle("Receive keys")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(stage == .preview)
@@ -137,12 +138,16 @@ struct ReceiveKeysView: View {
 
     @ViewBuilder private var waitingSections: some View {
         Section {
-            Text("On the other phone, open AgePony › Settings › Send keys to another device, and scan this code. Keep this screen open: with both phones on the same Wi-Fi, the keys arrive here directly in a few seconds.")
-                .font(AgePonyTypography.footnote)
+            Text("On the other phone, open Send keys to another device in AgePony's Settings and scan this code. Keep this screen open: with both phones on the same Wi-Fi, the keys arrive here directly in a few seconds.")
+                .font(AgePonyTypography.subheadline)
             if addresses.isEmpty || port == nil {
-                Text("This phone isn't on a Wi-Fi network, so the keys can't come across directly. Join the same Wi-Fi as the other phone (or its hotspot) and reopen this screen, or use a file below.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.red)
+                Label {
+                    Text("This phone isn't on a Wi-Fi network, so the keys can't come across directly. Join the same Wi-Fi as the other phone (or its hotspot) and reopen this screen, or use a file below.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(AgePonyColors.warning)
+                }
+                .font(AgePonyTypography.subheadline)
             }
             if !recipient.isEmpty {
                 AsyncQRImage(content: qrContent, correctionLevel: "L", side: 300)
@@ -159,18 +164,22 @@ struct ReceiveKeysView: View {
             Text("Check the sender shows this code")
         }
         Section {
-            Button(showFileRoute ? "Hide the file option" : "No shared Wi-Fi? Use a file instead") {
+            Button {
                 showFileRoute.toggle()
+            } label: {
+                if showFileRoute {
+                    Text("Hide the file option")
+                } else {
+                    Text("No shared Wi-Fi? Use a file instead")
+                }
             }
-            .foregroundStyle(AgePonyColors.tealCore)
             if showFileRoute {
                 Button("Copy the key as text") { ClipboardPreferences.copy(recipient) }
-                    .foregroundStyle(AgePonyColors.tealCore)
                 Button("Open the transfer file…") { importingFile = true }
-                    .foregroundStyle(AgePonyColors.tealCore)
                 TextField("…or paste the transfer text", text: $pasted, axis: .vertical)
                     .lineLimit(3...8)
-                    .font(AgePonyTypography.monoSmall)
+                    // Mono for the pasted data, not for the prompt.
+                    .font(pasted.isEmpty ? AgePonyTypography.body : AgePonyTypography.monoSmall)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button("Open pasted text") { openBytes(Data(pasted.trimmingCharacters(in: .whitespacesAndNewlines).utf8)) }
@@ -178,7 +187,7 @@ struct ReceiveKeysView: View {
             }
         } footer: {
             if showFileRoute {
-                Text("Then open what the sender made. If the other phone says it can't reach this one, check that AgePony is allowed under Settings › Privacy & Security › Local Network on both phones.")
+                Text("Then open what the sender made. If the other phone says it can't reach this one, check on both phones that AgePony is allowed under Privacy & Security, Local Network, in the Settings app.")
             }
         }
     }
@@ -189,16 +198,27 @@ struct ReceiveKeysView: View {
         if let inc = incoming {
             Section {
                 BigCode(code: transferCode ?? "")
-                Text("The sending phone (AgePony 5.0.1 or later) shows a transfer code too. If the two codes differ, someone else sent this transfer: tap Cancel and import nothing.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.red)
+                Label {
+                    Text("The sending phone (AgePony 5.0.1 or later) shows a transfer code too. If the two codes differ, someone else sent this transfer: tap Cancel and import nothing.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(AgePonyColors.warning)
+                }
+                .font(AgePonyTypography.subheadline)
                 CheckLine(label: "The code matches the other phone", checked: codeConfirmed) { codeConfirmed.toggle() }
             } header: {
                 Text("Transfer code")
             }
 
             if inc.identities.isEmpty && inc.recipients.isEmpty && inc.signers.isEmpty {
-                Section { Text("Nothing this phone can import.").foregroundStyle(.red) }
+                Section {
+                    Label {
+                        Text("Nothing this phone can import.")
+                    } icon: {
+                        Image(systemName: "xmark.octagon.fill")
+                            .foregroundStyle(AgePonyColors.destructive)
+                    }
+                }
             }
 
             if !inc.identities.isEmpty {
@@ -278,9 +298,9 @@ struct ReceiveKeysView: View {
 
     private func identityNotes(_ identity: StoredIdentity, known: Bool) -> [PreviewNote] {
         var notes: [PreviewNote] = []
-        if known { notes.append(.init(text: "Already on this phone, skipped.", warning: false)) }
+        if known { notes.append(.init(text: String(localized: "Already on this phone, skipped."), warning: false)) }
         if let clash = KeyPortability.nameClash(vault, identity) {
-            notes.append(.init(text: "You already have an identity named \"\(clash.name)\" with a different key.", warning: true))
+            notes.append(.init(text: String(localized: "You already have an identity named \"\(clash.name)\" with a different key."), warning: true))
         }
         if let note = KeyPortability.unverifiableNote(identity) { notes.append(.init(text: note, warning: false)) }
         return notes
@@ -288,19 +308,19 @@ struct ReceiveKeysView: View {
 
     private func recipientNotes(_ r: StoredRecipient, known: Bool) -> [PreviewNote] {
         var notes: [PreviewNote] = []
-        if known { notes.append(.init(text: "Already on this phone, skipped.", warning: false)) }
+        if known { notes.append(.init(text: String(localized: "Already on this phone, skipped."), warning: false)) }
         if let clash = KeyPortability.nameClash(vault, r) {
-            notes.append(.init(text: "You already have a recipient named \"\(clash.name)\" with a different key.", warning: true))
+            notes.append(.init(text: String(localized: "You already have a recipient named \"\(clash.name)\" with a different key."), warning: true))
         }
         return notes
     }
 
     private func signerNotes(_ s: IncomingSigner, known: Bool) -> [PreviewNote] {
         var notes: [PreviewNote] = []
-        if known { notes.append(.init(text: "Already trusted on this phone, skipped.", warning: false)) }
+        if known { notes.append(.init(text: String(localized: "Already trusted on this phone, skipped."), warning: false)) }
         if let refused = s.refusalReason { notes.append(.init(text: refused, warning: true)) }
         if let clash = KeyPortability.nameClash(vault, s.signer) {
-            notes.append(.init(text: "Same name as \(clash), with a different key.", warning: true))
+            notes.append(.init(text: String(localized: "Same name as \(clash), with a different key."), warning: true))
         }
         return notes
     }
@@ -310,14 +330,23 @@ struct ReceiveKeysView: View {
     @ViewBuilder private var doneSection: some View {
         if let s = summary {
             Section {
-                Label("Imported", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(AgePonyColors.tealCore)
-                    .font(AgePonyTypography.headline)
-                Text("\(s.identitiesAdded) identities, \(s.recipientsAdded) recipients, \(s.signersAdded) signers"
-                     + (s.skipped > 0 ? " (\(s.skipped) already here, skipped)" : "")
-                     + (leftOut > 0 ? ", \(leftOut) left out." : "."))
+                Label {
+                    Text("Imported")
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(AgePonyColors.success)
+                }
+                .font(AgePonyTypography.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Added ^[\(s.identitiesAdded) identity](inflect: true), ^[\(s.recipientsAdded) recipient](inflect: true) and ^[\(s.signersAdded) signer](inflect: true).")
+                    if s.skipped > 0 {
+                        Text("Skipped ^[\(s.skipped) item](inflect: true) already on this phone.")
+                    }
+                    if leftOut > 0 {
+                        Text("Left out ^[\(leftOut) item](inflect: true) you didn't tick.")
+                    }
+                }
                 Button("Done") { dismiss() }
-                    .foregroundStyle(AgePonyColors.tealCore)
             } footer: {
                 Text("If you moved it with a file, delete that file from wherever it went through.")
             }
@@ -333,7 +362,6 @@ struct ReceiveKeysView: View {
                 stage = .waiting
                 begin()
             }
-            .foregroundStyle(AgePonyColors.tealCore)
         }
     }
 
@@ -346,7 +374,7 @@ struct ReceiveKeysView: View {
             session = id
             recipient = try id.recipient().ageRecipient
         } catch {
-            self.error = "Couldn't make a receive key: \(error.localizedDescription)"
+            self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't make a receive key."))
             return
         }
         sessionStamp = UUID()
@@ -373,7 +401,7 @@ struct ReceiveKeysView: View {
             } catch {
                 let message = Self.describe(error)
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self.error = "A transfer arrived but couldn't be opened: \(message)" }
+                    MainActor.assumeIsolated { self.error = String(localized: "A transfer arrived but couldn't be opened. \(message)") }
                 }
                 return false
             }
@@ -390,11 +418,11 @@ struct ReceiveKeysView: View {
         link.onReady = { readyPort, bound in
             port = readyPort
             boundHost = bound ? bind?.ip : nil
-            if error == LanLinkError.localNetworkDenied.localizedDescription { error = nil }
+            if error == LanLinkError.localNetworkDenied.errorDescription { error = nil }
         }
         link.onFailed = { failure in
             port = nil
-            if let e = failure as? LanLinkError { error = e.localizedDescription }
+            if let e = failure as? LanLinkError { error = e.errorDescription }
         }
         listener = link
         link.start()
@@ -447,7 +475,7 @@ struct ReceiveKeysView: View {
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
         guard size <= LanTransfer.maxBytes, let bytes = try? Data(contentsOf: url) else {
-            error = "Couldn't read that file."
+            error = String(localized: "Couldn't read that file.")
             return
         }
         openBytes(bytes)
@@ -466,7 +494,7 @@ struct ReceiveKeysView: View {
             ReceiveSession.end()
             stage = .done
         } catch {
-            self.error = "Couldn't save to the vault: \(error.localizedDescription)"
+            self.error = UserMessage.text(for: error, fallback: String(localized: "Couldn't save the received keys to the vault."))
         }
     }
 
@@ -480,17 +508,17 @@ struct ReceiveKeysView: View {
     }
 
     nonisolated static func describe(_ error: Error) -> String {
-        if error is AgeArmorError { return "The transfer text is damaged or incomplete." }
-        guard let e = error as? KeyTransferError else { return "Couldn't open that transfer." }
+        if error is AgeArmorError { return String(localized: "The transfer text is damaged or incomplete.") }
+        guard let e = error as? KeyTransferError else { return String(localized: "Couldn't open that transfer.") }
         switch e {
         case .wrongSession:
-            return "It was made for a different receive session. On the sending phone, scan the code on this screen and send again."
+            return String(localized: "It was made for a different receive session. On the sending phone, scan the code on this screen and send again.")
         case .notATransfer, .unsupportedFormat:
-            return "That isn't an AgePony key transfer."
+            return String(localized: "That isn't an AgePony key transfer.")
         case .tooManyEntries:
-            return "That transfer holds too many entries."
+            return String(localized: "That transfer holds too many entries.")
         case .notARecipient:
-            return "Couldn't open that transfer."
+            return String(localized: "Couldn't open that transfer.")
         }
     }
 }

@@ -1,1 +1,1 @@
-Now post-quantum: hybrid ML-KEM keys that resist future quantum computers. And size stopped mattering. A 1 GB file encrypts like a small one.
+Lock the vault with Face ID alone, with no passcode fallback. On iOS 26, new quantum-safe hardware keys live entirely in the Secure Enclave.

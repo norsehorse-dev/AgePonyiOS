@@ -1,24 +1,22 @@
-AgePony 5.0.1 brings keys that live in hardware, keys you can move to another phone or put on paper, and every fix from a full security audit.
+AgePony 5.1.0 fixes setup on iPhones with Face ID turned off and adds a Face ID only lock.
 
 New
-- Hardware keys: make a decryption key inside this iPhone's Secure Enclave, published as an age 1.3 recipient. A quantum-safe form adds ML-KEM-768.
-- Decrypt with a hardware security key over NFC.
-- Encrypt to age 1.3 tag recipients.
-- Move keys to another phone: scan a code and your keys go straight across the same Wi-Fi, encrypted to a one-time key, or as a file. Both phones show matching codes before anything is imported.
-- Paper backup: a printable page with your key as a QR code and text, protected with a passphrase by default.
-- Continue without unlocking: passphrase text and files work with the vault locked.
-- "Also encrypt to" a backup key on every encrypt.
+- Face ID only lock: the device passcode can no longer open the vault. If you've set an AgePony password, it still works when Face ID can't.
+- In Face ID only mode, a hardware key can also require Face ID on every use.
+- On iOS 26, new quantum-safe hardware keys keep both halves in the Secure Enclave, and the ML-KEM and X-Wing steps run on Apple's CryptoKit. Earlier iOS versions keep AgePony's own code, and existing keys keep working.
+- Hardware security keys ask for the PIN first, so a decrypt takes one tap.
+- Key pickers show each key's type and the start of the key, so two keys with similar names are easy to tell apart.
 
 Changed
-- Signed files are plain age files: the signature rides in an encrypted header stanza that covers who the file was encrypted to, so age -d returns your original bytes. Older signed files still verify.
-- Saved recipients no longer count as trusted signers.
+- A plainer design throughout, with error messages in plain words and a code where one helps.
+- AgePony is now tested against the 147 shared age test vectors.
 
 Fixed
-- A duress password now makes the vault password-only, so Face ID can't skip it.
-- The vault is kept out of iCloud and computer backups, and an app password is tied to this iPhone.
-- Wrong password attempts slow down, with an optional erase after 10.
-- The app switcher and screen recordings no longer show keys in sheets.
-- Setup works on an iPhone with no passcode.
-- Stricter file parsing, and leftover shared files are cleaned up.
+- Setup no longer stops with "Keychain refused the request" on iPhones that have a passcode but Face ID turned off. If iOS won't protect the vault with Face ID or the passcode, setup offers an AgePony password instead.
+- A vault set up with only the passcode moves to Face ID once Face ID is turned on.
+- Post-quantum keys now refuse a malformed key share that the test vectors turned up.
+- A file that finished decrypting after you closed the screen is no longer left behind.
+
+The 5.0.1 notes called the September review a full security audit. It was an internal security review, not an independent audit. The full report is published in the AgePony source repository.
 
 Everything still runs on your device. No tracking, no ads.

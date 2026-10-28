@@ -29,45 +29,19 @@ struct RecipientDetailView: View {
             if let recipient {
                 Form {
                     Section {
-                        HStack {
-                            Text("Name")
-                            Spacer()
-                            Text(recipient.name).foregroundStyle(.secondary)
-                            Button {
-                                renameDraft = recipient.name
-                                renaming = true
-                            } label: {
-                                Image(systemName: "pencil")
-                            }
-                        }
-                        HStack {
-                            Text("Type")
-                            Spacer()
-                            Text(typeLabel(recipient.type))
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Source")
-                            Spacer()
-                            Text(sourceLabel(recipient.source))
-                                .foregroundStyle(.secondary)
-                        }
+                        LabeledContent("Name", value: recipient.name)
+                        LabeledContent("Type", value: typeLabel(recipient.type))
+                        LabeledContent("Source", value: sourceLabel(recipient.source))
                         if let meta = recipient.sourceMetadata, !meta.isEmpty {
-                            HStack {
-                                Text("Origin")
-                                Spacer()
+                            LabeledContent("Origin") {
                                 Text(meta)
-                                    .font(AgePonyTypography.monoCaption)
-                                    .foregroundStyle(.secondary)
+                                    .font(AgePonyTypography.monoSmall)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
                         }
-                        HStack {
-                            Text("Added")
-                            Spacer()
+                        LabeledContent("Added") {
                             Text(recipient.createdAt, style: .date)
-                                .foregroundStyle(.secondary)
                         }
                     }
 
@@ -78,9 +52,9 @@ struct RecipientDetailView: View {
                             showsQR: true
                         )
                         if let comment = recipient.sshComment, !comment.isEmpty {
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text("Comment")
-                                    .font(AgePonyTypography.caption)
+                                    .font(AgePonyTypography.footnote)
                                     .foregroundStyle(.secondary)
                                 Text(comment)
                                     .font(AgePonyTypography.monoCaption)
@@ -99,9 +73,10 @@ struct RecipientDetailView: View {
                             Label("Delete recipient", systemImage: "trash")
                         }
                     } footer: {
-                        Text("Removing the recipient doesn't affect any files you've already encrypted to them — those remain decryptable by anyone holding the matching private key.")
+                        Text("Removing the recipient doesn't affect files you've already encrypted to them. Anyone holding the matching private key can still decrypt those.")
                     }
                 }
+                .textCase(nil)
             } else {
                 ContentUnavailableView(
                     "Recipient not found",
@@ -109,8 +84,19 @@ struct RecipientDetailView: View {
                 )
             }
         }
-        .navigationTitle(recipient?.name ?? "Recipient")
+        .navigationTitle(recipient?.name ?? String(localized: "Recipient"))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // A text button in the bar, not a pencil inside the row (5.1.0, U4).
+            if let recipient {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Rename") {
+                        renameDraft = recipient.name
+                        renaming = true
+                    }
+                }
+            }
+        }
         .alert("Rename recipient", isPresented: $renaming) {
             TextField("Name", text: $renameDraft)
             Button("Cancel", role: .cancel) {}
@@ -121,7 +107,7 @@ struct RecipientDetailView: View {
             }
         }
         .confirmationDialog(
-            "Delete \"\(recipient?.name ?? "this recipient")\"?",
+            "Delete \"\(recipient?.name ?? String(localized: "this recipient"))\"?",
             isPresented: $pendingDelete,
             titleVisibility: .visible
         ) {
@@ -149,12 +135,12 @@ struct RecipientDetailView: View {
 
     private func sourceLabel(_ s: StoredRecipientSource) -> String {
         switch s {
-        case .pasteAge:          return "Pasted age string"
-        case .pasteSSH:          return "Pasted SSH key"
-        case .qrScan:            return "QR scan"
-        case .github:            return "GitHub fetch"
-        case .contacts:          return "Contacts"
-        case .derivedFromIdentity: return "Derived from your identity"
+        case .pasteAge:          return String(localized: "Pasted age string")
+        case .pasteSSH:          return String(localized: "Pasted SSH key")
+        case .qrScan:            return String(localized: "QR scan")
+        case .github:            return String(localized: "GitHub fetch")
+        case .contacts:          return String(localized: "Contacts")
+        case .derivedFromIdentity: return String(localized: "Derived from your identity")
         }
     }
 }

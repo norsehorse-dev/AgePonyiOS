@@ -2,8 +2,8 @@
 //  FilesView.swift
 //  AgePony
 //
-//  The Files tab landing page. Entry buttons that open the Encrypt, Decrypt,
-//  Sign, and Verify flows as sheets. Each flow handles its own picker +
+//  The Files tab landing page. A list of rows that open the Encrypt, Decrypt,
+//  Sign, Verify, Inspect and Re-encrypt flows as sheets. Each flow handles its own picker +
 //  share-sheet lifecycle.
 //
 
@@ -26,71 +26,29 @@ struct FilesView: View {
     @State private var showMigrate: Bool = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "lock.doc")
-                .font(.system(size: 64, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-
-            Text("Files")
-                .font(AgePonyTypography.largeTitle)
-
-            Text("Encrypt, decrypt, sign, or verify a file with one of your identities or a passphrase.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
-
-            Spacer()
-
-            VStack(spacing: 14) {
-                Button {
-                    showEncrypt = true
-                } label: {
-                    Label("Encrypt a file", systemImage: "lock.fill")
-                }
-                .buttonStyle(.agePonyPrimary)
-
-                Button {
-                    showDecrypt = true
-                } label: {
-                    Label("Decrypt a file", systemImage: "lock.open.fill")
-                }
-                .buttonStyle(.agePonySecondary)
-
-                Button {
-                    showSign = true
-                } label: {
-                    Label("Sign a file", systemImage: "signature")
-                }
-                .buttonStyle(.agePonySecondary)
-
-                Button {
-                    showVerify = true
-                } label: {
-                    Label("Verify a file", systemImage: "checkmark.seal")
-                }
-                .buttonStyle(.agePonySecondary)
-
-                Button {
-                    showInspect = true
-                } label: {
-                    Label("Inspect a file", systemImage: "doc.text.magnifyingglass")
-                }
-                .buttonStyle(.agePonySecondary)
-
-                Button {
-                    showMigrate = true
-                } label: {
-                    Label("Re-encrypt a file", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .buttonStyle(.agePonySecondary)
+        List {
+            Section("Encryption") {
+                row("Encrypt a file", systemImage: "lock") { showEncrypt = true }
+                row("Decrypt a file", systemImage: "lock.open") { showDecrypt = true }
             }
-            .padding(.horizontal, 32)
-
-            Spacer()
+            Section {
+                row("Sign a file", systemImage: "signature") { showSign = true }
+                row("Verify a file", systemImage: "checkmark.seal") { showVerify = true }
+            } header: {
+                Text("Signatures")
+            } footer: {
+                Text("A signature shows who made a file and that it hasn't changed since.")
+            }
+            Section {
+                row("Inspect a file", systemImage: "doc.text.magnifyingglass") { showInspect = true }
+                row("Re-encrypt a file", systemImage: "arrow.triangle.2.circlepath") { showMigrate = true }
+            } header: {
+                Text("Other tools")
+            } footer: {
+                Text("Inspect shows who can open a file without decrypting it. Re-encrypt changes who can open it.")
+            }
         }
-        .padding(.top, 24)
-        .padding(.bottom, 56)
+        .textCase(nil)
         .sheet(isPresented: $showEncrypt) {
             NavigationStack {
                 EncryptFlow(vault: vault)
@@ -128,5 +86,13 @@ struct FilesView: View {
                 showDecrypt = true
             }
         }
+    }
+
+    /// One tool. Opens its flow as a sheet, so there's no chevron.
+    private func row(_ title: LocalizedStringKey, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+        }
+        .foregroundStyle(.primary)
     }
 }

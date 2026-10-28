@@ -3,7 +3,7 @@
 //  AgePony
 //
 //  Renders a string (an `age1...` / `ssh-*` public key) as a QR code so it can
-//  be scanned into another device's AgePony — the display counterpart to the
+//  be scanned into another device's AgePony: the display counterpart to the
 //  camera scanner in AddRecipientView. Generation is CoreImage, run OFF the main
 //  thread so the sheet opens instantly and shows a spinner while it renders; the
 //  code sits on a forced-white card so it scans in light or dark mode.
@@ -22,7 +22,7 @@ struct QRCodeView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 if let image {
                     Image(uiImage: image)
                         .interpolation(.none)
@@ -53,8 +53,8 @@ struct QRCodeView: View {
                     .textSelection(.enabled)
                     .padding(.horizontal)
 
-                Text("Scan this from another device's Add Recipient screen.")
-                    .font(AgePonyTypography.footnote)
+                Text("Scan this from another device's Add recipient screen.")
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)

@@ -44,7 +44,13 @@ struct TextEncryptView: View {
             } else {
                 encryptSection
             }
+            if let errorMessage {
+                Section {
+                    StatusText(errorMessage)
+                }
+            }
         }
+        .textCase(nil)
         .navigationTitle("Encrypt text")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -67,14 +73,6 @@ struct TextEncryptView: View {
                     onSaveRecipient: { try vault.addRecipient($0) }
                 )
             }
-        }
-        .alert(
-            "Encrypt failed",
-            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
         }
     }
 
@@ -99,12 +97,12 @@ struct TextEncryptView: View {
                 showRecipientPicker = true
             } label: {
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(recipientSummaryTitle)
-                            .font(AgePonyTypography.bodyEmph)
+                            .font(AgePonyTypography.body)
                             .foregroundStyle(.primary)
                         Text(recipientSummarySubtitle)
-                            .font(AgePonyTypography.caption)
+                            .font(AgePonyTypography.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -160,9 +158,14 @@ struct TextEncryptView: View {
                 Button {
                     copyResult()
                 } label: {
-                    Label(copied ? "Copied" : "Copy to clipboard",
-                          systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .frame(maxWidth: .infinity)
+                    Group {
+                        if copied {
+                            Label("Copied", systemImage: "checkmark")
+                        } else {
+                            Label("Copy to clipboard", systemImage: "doc.on.doc")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.agePonyPrimary)
                 .listRowInsets(EdgeInsets())
@@ -181,8 +184,6 @@ struct TextEncryptView: View {
                     resultArmored = nil
                     copied = false
                 }
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
             }
         }
     }
@@ -202,23 +203,23 @@ struct TextEncryptView: View {
 
     private var recipientSummaryTitle: String {
         if passphrase?.isEmpty == false {
-            return "Passphrase only"
+            return String(localized: "Passphrase only")
         }
         if recipients.isEmpty {
-            return "Choose recipients"
+            return String(localized: "Choose recipients")
         }
         let n = recipients.count
-        return n == 1 ? "1 recipient" : "\(n) recipients"
+        return String(AttributedString(localized: "^[\(n) recipient](inflect: true)").characters)
     }
 
     private var recipientSummarySubtitle: String {
         if passphrase?.isEmpty == false {
-            return "Encrypted with a passphrase (scrypt)"
+            return String(localized: "Encrypted with a passphrase (scrypt)")
         }
         if recipients.isEmpty {
-            return "Tap to add the people who can decrypt"
+            return String(localized: "Tap to add the people who can decrypt")
         }
-        return "Tap to change"
+        return String(localized: "Tap to change")
     }
 
     private func runEncrypt() {
@@ -242,13 +243,17 @@ struct TextEncryptView: View {
                     working = false
                 }
             } catch {
-                let description = String(describing: error)
+                let description = describe(error)
                 DispatchQueue.main.async {
                     errorMessage = description
                     working = false
                 }
             }
         }
+    }
+
+    private func describe(_ error: Error) -> String {
+        UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the text."))
     }
 
     private func copyResult() {

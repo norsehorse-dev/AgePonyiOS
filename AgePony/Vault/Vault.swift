@@ -28,6 +28,10 @@
 //    - A duress password makes the vault password-only (H-1): the Keychain copy
 //      is deleted and the lock mode is No lock, so a coerced unlock always goes
 //      through the password field, where the decoy can fire.
+//    - Face ID only (5.1.0, E6): the Keychain copy sits behind
+//      `.biometryCurrentSet` alone and is read only after a Face ID or Touch ID
+//      prompt with no passcode button. The mode needs the app password, which
+//      opens the vault after a Face ID reset and puts a fresh item back.
 //    - The password blob's key is bound to a this-device-only Keychain secret
 //      (M-2) and every password attempt goes through a persisted backoff (M-1).
 //    - The vault directory is excluded from backups (H-2).
@@ -41,6 +45,8 @@
 import Foundation
 import CryptoKit
 import Observation
+import Security
+import LocalAuthentication
 import AgePonyCore
 
 @Observable
@@ -77,6 +83,12 @@ public final class Vault {
             return biometricEnabled ? .biometric : .none
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKey.lockMode) }
+    }
+
+    /// The stored lock mode, for code with no Vault at hand (BiometricGate's
+    /// in-app prompts follow Face ID only, E6).
+    static var storedLockMode: LockMode {
+        UserDefaults.standard.string(forKey: SettingsKey.lockMode).map { LockMode.fromKey($0) } ?? .biometric
     }
 
     /// 5.0.1 (audit M-1): erase the vault once the app password has been entered
@@ -222,11 +234,18 @@ public final class Vault {
     ///     from the in-app biometric toggle, so flipping that toggle could change
     ///     how the vault locks. Pin the derived value once.
     ///   - L-21: move proxy credentials out of preferences into the Keychain.
+    ///   - E6: Face ID only with no app password (5.0.1 can remove it after a
+    ///     downgrade) becomes the default lock.
     private static func migrateLegacySettings() {
         let d = UserDefaults.standard
         if d.string(forKey: SettingsKey.lockMode) == nil, isProvisioned() {
             let bio = d.object(forKey: SettingsKey.biometricEnabled) as? Bool ?? true
             d.set((bio ? LockMode.biometric : LockMode.none).rawValue, forKey: SettingsKey.lockMode)
+        }
+        if let raw = d.string(forKey: SettingsKey.lockMode),
+           let normalized = LockMode.fromKey(raw).normalized(hasAppPassword: FileManager.default.fileExists(atPath: passwordBlobURL().path)),
+           normalized.rawValue != raw {
+            d.set(normalized.rawValue, forKey: SettingsKey.lockMode)
         }
         for key in [SettingsKey.proxyUsername, SettingsKey.proxyPassword] {
             if let old = d.string(forKey: key) {
@@ -275,10 +294,13 @@ public final class Vault {
     /// refuses the biometric ACL: the key is stored with no ACL, and the caller
     /// sets an app password straight away, which removes that copy (M-3).
     public func bootstrap(lockMode mode: LockMode = .biometric) async throws {
+        // Face ID only needs an app password, which a fresh vault doesn't have
+        // yet, so setup always starts from the default lock (E6).
+        let initial: LockMode = mode == .biometricOnly ? .biometric : mode
         let key = SymmetricKey(size: .bits256)
         let keyData = key.withUnsafeBytes { Data($0) }
-        try KeychainStore.storeMasterKey(keyData, biometric: mode.requiresBiometricACL)
-        lockMode = mode
+        try KeychainStore.storeMasterKey(keyData, biometric: initial.requiresBiometricACL)
+        lockMode = initial
         attempts.reset()
         self.masterKey = key
         self.identities = []
@@ -296,7 +318,18 @@ public final class Vault {
         // Password-only while a duress password is set (H-1). A 4.x vault may
         // still hold a Keychain copy until its first password unlock removes it.
         if hasDuressPassword { throw KeychainError.notFound }
-        let keyBytes = try KeychainStore.loadMasterKey(prompt: prompt)
+        // Face ID only without its password (removed by an older version):
+        // the default lock, so the password-less vault still has a way in.
+        if let normalized = lockMode.normalized(hasAppPassword: hasAppPassword), normalized != lockMode {
+            lockMode = normalized
+        }
+        let biometryOnly = lockMode == .biometricOnly
+        let keyBytes: Data
+        if biometryOnly {
+            keyBytes = try await loadBiometryOnlyKey(prompt: prompt)
+        } else {
+            keyBytes = try KeychainStore.loadMasterKey(prompt: prompt)
+        }
         let key = SymmetricKey(data: keyBytes)
         let payload = try loadEncryptedVault()
         let snapshot = try decryptVault(payload: payload, key: key)
@@ -309,6 +342,45 @@ public final class Vault {
         self.trashedRecipients = snapshot.trashedRecipients ?? []
         self.isUnlocked = true
         purgeExpiredTrash()
+        // A key that setup could only store behind the passcode (5.1.0) moves
+        // up to Face ID / Touch ID once biometrics are enrolled. Best effort:
+        // if iOS still refuses, the passcode-only copy stays.
+        if !biometryOnly, KeychainStore.storedProtection == .passcodeOnly, BiometricGate.availableBiometric() != .none {
+            try? KeychainStore.storeMasterKey(keyBytes, biometric: true)
+        } else if !biometryOnly, KeychainStore.storedIsBiometryOnly {
+            // A Face ID only item under the default lock (the mode was normalized
+            // above): put the passcode back as a way in, through the setup ladder.
+            try? KeychainStore.storeMasterKey(keyBytes, biometric: true)
+        }
+    }
+
+    /// Face ID only (E6): a Face ID or Touch ID prompt with no passcode button,
+    /// then the Keychain read with that prompt's context. The item is read only
+    /// when it was written behind biometrics alone, so a copy the passcode could
+    /// open is never used in this mode; the password unlock replaces it.
+    ///
+    /// A missing item, or one iOS refuses after biometrics said yes, is what a
+    /// Face ID reset or a new face leaves: `biometryChanged`, and the lock screen
+    /// asks for the password. `unlock` has already moved a password-less vault
+    /// to the default lock, so a password is always there to fall back on.
+    ///
+    /// Whether the item is biometry-only comes from the tag on the item itself,
+    /// not from preferences: an older version that rewrote it left the tag off.
+    private func loadBiometryOnlyKey(prompt: String) async throws -> Data {
+        if !KeychainStore.storedIsBiometryOnly { throw KeychainError.notFound }
+        // Not kept for Secure Enclave keys, as with the default lock's prompt.
+        let context = try await BiometricGate.biometricOnlyContext(reason: prompt, remember: false)
+        // Anything beyond the biometry just evaluated fails with
+        // errSecInteractionNotAllowed instead of showing passcode UI.
+        context.interactionNotAllowed = true
+        do {
+            return try KeychainStore.loadMasterKey(prompt: prompt, context: context)
+        } catch KeychainError.notFound {
+            throw KeychainError.biometryChanged
+        } catch KeychainError.unhandled(let status)
+                    where status == errSecAuthFailed || status == errSecInteractionNotAllowed {
+            throw KeychainError.biometryChanged
+        }
     }
 
     /// Drop the master key from memory. Called when the app enters background.
@@ -344,6 +416,16 @@ public final class Vault {
     public func renameIdentity(id: UUID, to newName: String) throws {
         guard let idx = identities.firstIndex(where: { $0.id == id }) else { return }
         identities[idx].name = newName
+        try persist()
+    }
+
+    /// Store what a YubiKey tap learned about a slot's PIN policy (5.1.0 item 1), in
+    /// place: same record, same position, same active identity.
+    public func setYubiKeyPINPolicy(_ policy: YubiKeyPINPolicy, forIdentity id: UUID) throws {
+        guard let idx = identities.firstIndex(where: { $0.id == id }),
+              identities[idx].type == .yubikey,
+              identities[idx].yubiKeyPINPolicy != policy else { return }
+        identities[idx].pinPolicy = policy
         try persist()
     }
 
@@ -609,13 +691,22 @@ public final class Vault {
         try writeBlob(blob, to: Self.passwordBlobURL())
         unlockSecretKind = kind
         attempts.reset()
-        try enforceKeychainPolicy()
+        if lockMode == .biometricOnly {
+            // The password is saved either way. With Face ID not enrolled right
+            // now the Face ID item can't be rewritten; the next password unlock
+            // tries again (E6 review).
+            try? enforceKeychainPolicy()
+        } else {
+            try enforceKeychainPolicy()
+        }
     }
 
     /// Remove the app password and any duress password. Refused while the
     /// password is the only way in (L-16): the user picks Biometric first.
+    /// Also refused in Face ID only mode, where the password is the way back in
+    /// after a Face ID reset (E6).
     public func removeAppPassword() throws {
-        guard !passwordIsOnlyUnlock else { throw VaultError.passwordIsOnlyUnlock }
+        guard !passwordIsOnlyUnlock, !lockMode.needsAppPassword else { throw VaultError.passwordIsOnlyUnlock }
         try? FileManager.default.removeItem(at: Self.duressBlobURL())
         try? FileManager.default.removeItem(at: Self.passwordBlobURL())
         UserDefaults.standard.removeObject(forKey: SettingsKey.unlockSecretKind)
@@ -650,30 +741,46 @@ public final class Vault {
     }
 
     /// Change the OS gate. Requires the vault to be unlocked. Refused while a
-    /// duress password is set (H-1).
+    /// duress password is set (H-1). Face ID only also needs the app password
+    /// (E6). If iOS refuses the new item, the previous mode and its item stay.
     public func setLockMode(_ mode: LockMode) throws {
         guard masterKey != nil else { throw VaultError.notUnlocked }
-        if mode == .biometric && hasDuressPassword { throw VaultError.lockModeLockedByDuress }
+        if mode != .none && hasDuressPassword { throw VaultError.lockModeLockedByDuress }
+        if mode.needsAppPassword && !hasAppPassword { throw VaultError.noAppPassword }
         let old = lockMode
         lockMode = mode
         do {
             try enforceKeychainPolicy()
         } catch {
             lockMode = old
+            // A refusal at the staging copy leaves the old item as it was; this
+            // also covers a failure after it, so the old mode always has its item.
+            try? enforceKeychainPolicy()
             throw error
         }
     }
 
     /// Make the Keychain copy of the vault key match the lock rules: present
-    /// (under the mode's ACL) in Biometric mode, or in No lock without a
-    /// password; absent otherwise (M-3, H-1). Only deletes once the password
-    /// blob exists, and only stores while the key is in memory.
+    /// (under the mode's ACL) in Biometric and Face ID only modes, or in No lock
+    /// without a password; absent otherwise (M-3, H-1). Only deletes once the
+    /// password blob exists, and only stores while the key is in memory.
+    ///
+    /// Runs after every password unlock too, which is how Face ID only gets a
+    /// fresh item after a Face ID reset (E6).
     private func enforceKeychainPolicy() throws {
         if hasDuressPassword && lockMode != .none { lockMode = .none }
-        let wanted = lockMode == .biometric || !hasAppPassword
+        // Face ID only without a password could leave a vault nothing opens
+        // after a Face ID reset; fall back to the default lock instead.
+        if lockMode.needsAppPassword && !hasAppPassword { lockMode = .biometric }
+        let wanted = lockMode.requiresBiometricACL || !hasAppPassword
         if wanted {
             guard let key = masterKey else { return }
-            try KeychainStore.storeMasterKey(key.withUnsafeBytes { Data($0) }, biometric: lockMode.requiresBiometricACL)
+            let bytes = key.withUnsafeBytes { Data($0) }
+            if lockMode == .biometricOnly {
+                try KeychainStore.storeBiometryOnlyMasterKey(bytes)
+            } else {
+                try KeychainStore.storeMasterKey(bytes, biometric: lockMode.requiresBiometricACL)
+            }
         } else if hasAppPassword {
             try KeychainStore.deleteMasterKey()
         }

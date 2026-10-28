@@ -160,7 +160,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             session.startRunning()
         } catch {
             DispatchQueue.main.async {
-                self.delegate?.scannerDidFail(.setupFailed(error.localizedDescription))
+                self.delegate?.scannerDidFail(.setupFailed("input device"))
             }
         }
     }

@@ -38,17 +38,33 @@ nonisolated enum LanLinkError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .localNetworkDenied:
-            return "AgePony isn't allowed on the local network. Turn it on in Settings › Privacy & Security › Local Network, or use a file instead."
+            return String(localized: "AgePony isn't allowed on the local network. Turn it on under Privacy & Security, Local Network, in the Settings app, or use a file instead.")
         case .unreachable(let detail):
-            return "Couldn't reach the other phone. Put both on the same Wi-Fi (or one on the other's hotspot)."
-                + (detail.map { " (\($0))" } ?? "")
+            let base = String(localized: "Couldn't reach the other phone. Put both on the same Wi-Fi (or one on the other's hotspot).")
+            return detail.map { "\(base) (\($0))" } ?? base
         case .refused:
-            return "The other phone refused the transfer. Start Receive keys again and rescan."
+            return String(localized: "The other phone refused the transfer. Start Receive keys again and rescan.")
         case .closed:
-            return "The other phone closed the connection."
+            return String(localized: "The other phone closed the connection.")
         case .tooLarge:
-            return "Transfer is too large to send directly."
+            return String(localized: "Transfer is too large to send directly.")
         }
+    }
+
+    /// A code for a report, shown after the message. Never the error's own text
+    /// (5.1.0, U5). Nil for an error with no code worth showing.
+    static func code(for error: Error) -> String? {
+        if let nw = error as? NWError {
+            switch nw {
+            case .posix(let code): return "POSIX \(code.rawValue)"
+            case .dns(let code):   return "DNS \(code)"
+            case .tls(let status): return "OSStatus \(status)"
+            default:               return nil
+            }
+        }
+        guard type(of: error) is NSError.Type else { return nil }
+        let ns = error as NSError
+        return "\(ns.domain) \(ns.code)"
     }
 
     /// iOS reports a denied Local Network permission as this DNS-SD error.
@@ -345,7 +361,8 @@ nonisolated enum TransferSender {
             }
         }
         if let e = lastError as? LanLinkError { throw e }
-        throw LanLinkError.unreachable(lastError.map { ($0 as NSError).localizedDescription })
+        if let e = lastError as? LanTransferError { throw e }
+        throw LanLinkError.unreachable(lastError.flatMap { LanLinkError.code(for: $0) })
     }
 
     /// One attempt against one address: 5 s to connect, 30 s for the rest.
@@ -366,7 +383,7 @@ nonisolated enum TransferSender {
                     connection.cancel()
                     cont.resume(with: result)
                 }
-                let connectTimeout = DispatchWorkItem { finish(.failure(LanLinkError.unreachable("timed out"))) }
+                let connectTimeout = DispatchWorkItem { finish(.failure(LanLinkError.unreachable(String(localized: "timed out")))) }
                 let permissionTimeout = DispatchWorkItem { finish(.failure(LanLinkError.localNetworkDenied)) }
                 queue.asyncAfter(deadline: .now() + 5, execute: connectTimeout)
 

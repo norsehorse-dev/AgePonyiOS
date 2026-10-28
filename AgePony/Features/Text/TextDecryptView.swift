@@ -23,10 +23,14 @@ struct TextDecryptView: View {
     @State private var resultPlaintext: String?
     @State private var working: Bool = false
     @State private var errorMessage: String?
-    /// YubiKey PIV PIN for this decrypt only, after the key asked for it.
-    @State private var yubiKeyPIN: String?
+    /// The YubiKey PIN prompt's answer, for the next `prepare` call only (5.1.0:
+    /// asked before the tap). Dropped as soon as `prepare` returns.
+    @State private var yubiKeyPIN: YubiKeyPINEntry?
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     @State private var showYubiKeyPIN = false
     @State private var yubiKeyPINNote: String?
+    @State private var yubiKeyOffersNoPIN = false
     @State private var copied: Bool = false
 
     @Environment(\.dismiss) private var dismiss
@@ -41,7 +45,7 @@ struct TextDecryptView: View {
         Form {
             inputSection
             if let summary = summary {
-                FileInfoSection(summary: summary)
+                FileInfoSection(filename: nil, summary: summary)
                 if summary.onlyScrypt {
                     passphraseSection
                 }
@@ -54,7 +58,14 @@ struct TextDecryptView: View {
             if let plaintext = resultPlaintext {
                 resultSection(plaintext: plaintext)
             }
+            if let errorMessage {
+                Section {
+                    StatusText(errorMessage)
+                }
+            }
         }
+        .textCase(nil)
+        .ownerCheck(ownerCheck, vault: vault)
         .navigationTitle("Decrypt text")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -67,17 +78,9 @@ struct TextDecryptView: View {
                 inspect()
             }
         }
-        .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote) { pin in
+        .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote, offersNoPIN: yubiKeyOffersNoPIN) { pin in
             yubiKeyPIN = pin
             Task { await startDecrypt(afterPIN: true) }
-        }
-        .alert(
-            "Decrypt failed",
-            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
         }
     }
 
@@ -99,7 +102,7 @@ struct TextDecryptView: View {
         } header: {
             Text("Encrypted text")
         } footer: {
-            Text("Paste the BEGIN/END armored block, including the markers.")
+            Text("Paste the armored block, including the BEGIN and END markers.")
         }
     }
 
@@ -172,9 +175,14 @@ struct TextDecryptView: View {
                 Button {
                     copyResult()
                 } label: {
-                    Label(copied ? "Copied" : "Copy to clipboard",
-                          systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .frame(maxWidth: .infinity)
+                    Group {
+                        if copied {
+                            Label("Copied", systemImage: "checkmark")
+                        } else {
+                            Label("Copy to clipboard", systemImage: "doc.on.doc")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.agePonyPrimary)
                 .listRowInsets(EdgeInsets())
@@ -187,8 +195,6 @@ struct TextDecryptView: View {
                     resultPlaintext = nil
                     copied = false
                 }
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
             }
         }
     }
@@ -218,6 +224,9 @@ struct TextDecryptView: View {
     /// Handles the biometric prompt (which must run on MainActor) before
     /// kicking the actual decrypt onto a background queue.
     private func startDecrypt(afterPIN: Bool = false) async {
+        // The PIN is used for this one attempt at most; no early return keeps it.
+        let pinEntry = yubiKeyPIN
+        yubiKeyPIN = nil
         guard let summary else { return }
         working = true
         errorMessage = nil
@@ -225,12 +234,12 @@ struct TextDecryptView: View {
         if !summary.onlyScrypt && !afterPIN {
             // Identity path needs biometric to reveal private keys.
             do {
-                try await BiometricGate.authenticate(reason: "Decrypt text")
+                try await ownerCheck.authenticate(vault, reason: String(localized: "Decrypt text"))
             } catch BiometricGateError.userCancelled {
                 working = false
                 return
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = UserMessage.text(for: error, fallback: BiometricGate.didNotConfirmText)
                 working = false
                 return
             }
@@ -238,11 +247,13 @@ struct TextDecryptView: View {
 
         var identitiesSnapshot: [any AgeIdentity] = []
         if !summary.onlyScrypt {
-            switch await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: yubiKeyPIN) {
+            let prepared = await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: pinEntry)
+            switch prepared {
             case .ready(let ids):
                 identitiesSnapshot = ids
-            case .needsPIN(let note):
+            case .needsPIN(let note, let offersNoPIN):
                 yubiKeyPINNote = note
+                yubiKeyOffersNoPIN = offersNoPIN
                 showYubiKeyPIN = true
                 working = false
                 return
@@ -255,7 +266,6 @@ struct TextDecryptView: View {
                 return
             }
         }
-        yubiKeyPIN = nil
 
         let passphraseSnapshot = passphraseInput
         let summarySnapshot = summary
@@ -277,7 +287,7 @@ struct TextDecryptView: View {
                         identities: identitiesSnapshot
                     )
                 }
-                let resultString = String(data: plaintext, encoding: .utf8) ?? "(non-UTF-8 plaintext, \(plaintext.count) bytes)"
+                let resultString = String(data: plaintext, encoding: .utf8) ?? String(localized: "(Not UTF-8 text, \(plaintext.count) bytes)")
                 DispatchQueue.main.async {
                     resultPlaintext = resultString
                     working = false
@@ -302,80 +312,18 @@ struct TextDecryptView: View {
     private func describeInspectError(_ error: Error) -> String {
         if let e = error as? AgeFileInspectorError {
             switch e {
-            case .notAnAgeFile:          return "This doesn't look like an armored age block."
-            case .malformedArmor:        return "The armored block is malformed."
-            case .headerParseFailed(let m): return "Couldn't parse the age header: \(m)"
-            // Text mode inspects bytes already in hand, so this cannot arise here.
-            case .cannotOpenFile(let name): return "Couldn't open \(name)."
+            case .notAnAgeFile:   return String(localized: "This isn't an armored age block. It should start with -----BEGIN AGE ENCRYPTED FILE-----.")
+            case .malformedArmor: return String(localized: "The armored block is damaged. Copy it again, including the BEGIN and END lines.")
+            case .headerParseFailed, .cannotOpenFile: break
             }
         }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't read the encrypted text."))
     }
 
     private func describeDecryptError(_ error: Error) -> String {
-        let s = String(describing: error)
-        if s.contains("wrongPassphrase") { return "Wrong passphrase." }
-        if s.contains("noMatchingIdentity") { return "No identity in this vault can decrypt this text." }
-        return error.localizedDescription
-    }
-}
-
-private struct FileInfoSection: View {
-    let summary: AgeFileSummary
-
-    var body: some View {
-        Section {
-            HStack(spacing: 16) {
-                meta("Size", ByteCountFormatter.string(fromByteCount: Int64(summary.byteCount), countStyle: .file))
-                meta("Format", summary.armored ? "PEM-armored" : "Binary")
-                meta("Recipients", "\(summary.recipientCount)")
-                Spacer()
-            }
-
-            ForEach(summary.stanzas) { stanza in
-                HStack(spacing: 10) {
-                    Image(systemName: icon(for: stanza.kind))
-                        .foregroundStyle(AgePonyColors.tealCore)
-                        .frame(width: 18)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(stanza.kind.displayLabel)
-                            .font(AgePonyTypography.footnote)
-                        if let matched = stanza.matchedIdentityName {
-                            Text("matches your identity \"\(matched)\"")
-                                .font(AgePonyTypography.caption)
-                                .foregroundStyle(AgePonyColors.tealCore)
-                        }
-                    }
-                    Spacer()
-                }
-            }
-        } header: {
-            Text("This text contains")
+        if let e = error as? AgeError, case .noMatchingIdentity = e {
+            return String(localized: "None of the identities in this vault can decrypt this text.")
         }
-    }
-
-    private func meta(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(AgePonyTypography.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(AgePonyTypography.footnote)
-        }
-    }
-
-    private func icon(for kind: StanzaSummary.Kind) -> String {
-        switch kind {
-        case .x25519:      return "key.fill"
-        case .sshEd25519:  return "lock.shield"
-        case .sshRSA:      return "lock.shield"
-        case .scrypt:      return "lock.rectangle"
-        case .postQuantum: return "atom"
-        case .yubikey:     return "key"
-        case .tag:         return "cpu"
-        case .tagPQ:       return "cpu"
-        case .signature:   return "signature"
-        case .unknown:     return "questionmark.circle"
-        }
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the text."))
     }
 }

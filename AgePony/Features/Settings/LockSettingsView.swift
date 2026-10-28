@@ -18,6 +18,11 @@
 //    - L-16: the password can't be removed while it is the only way in.
 //    - M-1: new secrets need at least 6 digits or 8 characters.
 //
+//  5.1.0 (E6): Face ID only ("Touch ID only", "Optic ID only"). It needs the app
+//  password, so choosing it without one sets one up first. Choosing it is not
+//  a weakening; leaving it is, so that asks for the password (L-15). It isn't
+//  offered while a duress password is set (H-1).
+//
 
 import SwiftUI
 import AgePonyCore
@@ -34,6 +39,9 @@ struct LockSettingsView: View {
     @State private var eraseAfterFailures: Bool
 
     @State private var showSetPassword = false
+    /// The password sheet was opened on the way to Face ID only (E6).
+    @State private var biometricOnlyAfterPassword = false
+    @State private var confirmBiometricOnly = false
     @State private var showSetDuress = false
     @State private var confirmRemovePassword = false
     @State private var reauthAction: ReauthAction?
@@ -41,6 +49,8 @@ struct LockSettingsView: View {
     @State private var afterReauth: (() -> Void)?
     @State private var busy = false
     @State private var errorMessage: String?
+    /// A change that can't be made as things stand (not a failed save).
+    @State private var refusal: String?
 
     /// Something that waits for the owner to prove it's them (L-15).
     struct ReauthAction: Identifiable {
@@ -68,18 +78,22 @@ struct LockSettingsView: View {
                 eraseSection
             }
         }
+        .textCase(nil)
         .navigationTitle("Lock & password")
         .navigationBarTitleDisplayMode(.inline)
         .disabled(busy)
-        .sheet(isPresented: $showSetPassword) {
+        .sheet(isPresented: $showSetPassword, onDismiss: { biometricOnlyAfterPassword = false }) {
             SecretEntrySheet(
-                title: hasPassword ? "Change \(secretNoun)" : "Set a password or PIN",
+                title: passwordSheetTitle,
                 kind: secretKind ?? .password,
                 allowKindChange: !hasDuress
             ) { secret, kind in
+                let thenBiometricOnly = biometricOnlyAfterPassword
+                biometricOnlyAfterPassword = false
                 run {
                     try await vault.setAppPassword(secret, kind: kind)
                     secretKind = kind
+                    if thenBiometricOnly { try vault.setLockMode(.biometricOnly) }
                 }
             }
         }
@@ -103,6 +117,25 @@ struct LockSettingsView: View {
             }
         }
         .confirmationDialog(
+            "Use \(biometricOnlyLabel)?",
+            isPresented: $confirmBiometricOnly,
+            titleVisibility: .visible
+        ) {
+            if hasPassword {
+                Button("Use \(biometricOnlyLabel)") {
+                    run { try vault.setLockMode(.biometricOnly) }
+                }
+            } else {
+                Button("Set a password or PIN") {
+                    biometricOnlyAfterPassword = true
+                    showSetPassword = true
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(biometricOnlyConfirmMessage)
+        }
+        .confirmationDialog(
             "Remove the app \(secretNoun)?",
             isPresented: $confirmRemovePassword,
             titleVisibility: .visible
@@ -112,9 +145,19 @@ struct LockSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(hasDuress
-                 ? "This also removes the duress \(secretNoun). The vault will open with \(lockModeWord) only."
-                 : "The vault will open with \(lockModeWord) only.")
+            if hasDuress {
+                Text("This also removes the duress \(secretNoun). The vault will open with \(lockModeWord) only.")
+            } else {
+                Text("The vault will open with \(lockModeWord) only.")
+            }
+        }
+        .alert(
+            "Can't change the lock",
+            isPresented: Binding(get: { refusal != nil }, set: { if !$0 { refusal = nil } })
+        ) {
+            Button("OK", role: .cancel) { refusal = nil }
+        } message: {
+            Text(refusal ?? "")
         }
         .alert(
             "Couldn't save",
@@ -132,6 +175,9 @@ struct LockSettingsView: View {
         Section {
             Picker("Lock", selection: Binding(get: { lockMode }, set: changeLockMode)) {
                 Text(biometricWord).tag(LockMode.biometric)
+                if offersBiometricOnly {
+                    Text(biometricOnlyLabel).tag(LockMode.biometricOnly)
+                }
                 Text("No lock").tag(LockMode.none)
             }
             .disabled(hasDuress)
@@ -144,23 +190,50 @@ struct LockSettingsView: View {
 
     private var lockModeFooter: String {
         if hasDuress {
-            return "While a duress \(secretNoun) is set, only the app \(secretNoun) opens the vault, so a forced unlock always goes through the field where the duress \(secretNoun) works. Remove the duress \(secretNoun) to use \(biometricWord) again."
+            return String(localized: "While a duress \(secretNoun) is set, only the app \(secretNoun) opens the vault, so a forced unlock always goes through the field where the duress \(secretNoun) works. Remove the duress \(secretNoun) to use \(biometricWord) again.")
         }
         switch (lockMode, hasPassword) {
         case (.biometric, _):
-            return "\(biometricWord), or your device passcode, unlocks the vault. Any app \(secretNoun) you set below also works."
+            var text = String(localized: "\(biometricWord), or your device passcode, unlocks the vault. Any app \(secretNoun) you set below also works.")
+            if offersBiometricOnly {
+                text += " " + String(localized: "\(biometricOnlyLabel) leaves the passcode out and uses an app password or PIN as the way back in.")
+            }
+            return text
+        case (.biometricOnly, _):
+            var text = String(localized: "Only \(biometryName) or your app \(secretNoun) opens the vault. The device passcode doesn't. If \(biometryName) is reset or changed in the Settings app, enter your \(secretNoun) once and \(biometryName) works again.")
+            if hasEnclaveKeys {
+                text += " " + String(localized: "Secure Enclave keys made before you chose \(biometricOnlyLabel) keep the protection they were made with: one that asks on each use still accepts the device passcode.")
+            }
+            return text
         case (.none, true):
-            return "Only the app \(secretNoun) opens the vault."
+            return String(localized: "Only the app \(secretNoun) opens the vault.")
         case (.none, false):
-            return "The vault opens with no prompt. Set an app password below, or choose \(biometricWord), to protect it."
+            return String(localized: "The vault opens with no prompt. Set an app password below, or choose \(biometricWord), to protect it.")
         }
     }
 
     private func changeLockMode(_ new: LockMode) {
         guard new != lockMode else { return }
+        // No lock with a password is password-only; any OS lock adds a way in,
+        // so it needs the owner too (L-15, E6 review).
+        let addsWayIn = lockMode == .none && hasPassword
+        if new == .biometricOnly {
+            // It needs Face ID set up and an app password; the dialog explains
+            // and sets one up if needed.
+            guard new.isAvailable(duressSet: hasDuress, biometryEnrolled: BiometricGate.availableBiometric() != .none) else {
+                refusal = biometricOnlyRefusal
+                return
+            }
+            if addsWayIn {
+                requireOwner { confirmBiometricOnly = true }
+            } else {
+                confirmBiometricOnly = true
+            }
+            return
+        }
         // Without a device passcode iOS refuses the biometric Keychain lock (plan 2.8).
         if new == .biometric && !BiometricGate.devicePasscodeIsSet() {
-            errorMessage = "This iPhone has no passcode, and iOS only lets Face ID, Touch ID or the passcode protect a key when there is one. Set a passcode in Settings › Face ID & Passcode first."
+            refusal = String(localized: "This iPhone has no passcode, and iOS only lets Face ID, Touch ID or the passcode protect a key when there is one. Set a passcode first, under Face ID & Passcode in the Settings app.")
             return
         }
         let apply = {
@@ -169,8 +242,10 @@ struct LockSettingsView: View {
                 lockMode = new
             }
         }
-        // Dropping biometric weakens the lock unless a password takes over.
-        if new == .none { requireOwner(apply) } else { apply() }
+        // Dropping biometric weakens the lock unless a password takes over,
+        // leaving Face ID only lets the passcode back in (E6), and leaving
+        // password-only No lock adds Face ID and the passcode.
+        if new == .none || lockMode == .biometricOnly || addsWayIn { requireOwner(apply) } else { apply() }
     }
 
     // MARK: - Auto-lock
@@ -210,10 +285,14 @@ struct LockSettingsView: View {
                     .foregroundStyle(.secondary)
                 Button("Change…") { requireOwner { showSetPassword = true } }
                 Button("Remove", role: .destructive) {
-                    if vault.passwordIsOnlyUnlock {
-                        errorMessage = hasDuress
-                            ? "Your \(secretNoun) is the only way into the vault. Remove the duress \(secretNoun), then choose \(biometricWord) above before removing it."
-                            : "Your \(secretNoun) is the only way into the vault. Choose \(biometricWord) above before removing it."
+                    if lockMode == .biometricOnly {
+                        refusal = String(localized: "\(biometricOnlyLabel) needs your \(secretNoun) as the way back in if \(biometryName) is reset. Choose another lock above before removing it.")
+                    } else if vault.passwordIsOnlyUnlock {
+                        if hasDuress {
+                            refusal = String(localized: "Your \(secretNoun) is the only way into the vault. Remove the duress \(secretNoun), then choose \(biometricWord) above before removing it.")
+                        } else {
+                            refusal = String(localized: "Your \(secretNoun) is the only way into the vault. Choose \(biometricWord) above before removing it.")
+                        }
                     } else {
                         confirmRemovePassword = true
                     }
@@ -270,19 +349,75 @@ struct LockSettingsView: View {
 
     private var secretNoun: String { (secretKind ?? .password).displayNoun }
 
-    private var lockModeWord: String { lockMode == .biometric ? biometricWord : "no lock" }
+    private var lockModeWord: String {
+        switch lockMode {
+        case .biometric:     return biometricWord
+        case .biometricOnly: return biometricOnlyLabel
+        case .none:          return String(localized: "no lock")
+        }
+    }
+
+    /// The device's biometric by name, even while nothing is enrolled (E6).
+    private var biometryName: String { BiometricGate.biometryName() }
+
+    /// "Face ID only", "Touch ID only" or "Optic ID only".
+    private var biometricOnlyLabel: String { String(localized: "\(biometryName) only") }
+
+    /// Face ID only is listed when the iPhone has Face ID or Touch ID and no
+    /// duress password is set, and always while it is the current mode so the
+    /// picker shows it. A lockout or nothing enrolled still lists it; choosing
+    /// it then says what to do.
+    private var offersBiometricOnly: Bool {
+        lockMode == .biometricOnly || (!hasDuress && BiometricGate.biometryState() != .unavailable)
+    }
+
+    /// Why Face ID only can't be chosen right now: duress, a lockout, or
+    /// nothing enrolled (E6 review).
+    private var biometricOnlyRefusal: String {
+        if hasDuress {
+            return String(localized: "Remove the duress \(secretNoun) to use \(biometricOnlyLabel).")
+        }
+        switch BiometricGate.biometryState() {
+        case .lockedOut:
+            return String(localized: "\(biometryName) is locked after too many tries. Lock your iPhone and unlock it with the passcode to turn \(biometryName) back on, then choose \(biometricOnlyLabel) again.")
+        case .notEnrolled:
+            return String(localized: "\(biometricOnlyLabel) needs \(biometryName) set up on this iPhone, under \(biometryName) & Passcode in the Settings app.")
+        case .available, .unavailable:
+            return String(localized: "AgePony can't use \(biometryName) right now. Check that AgePony is allowed to use \(biometryName) in the Settings app.")
+        }
+    }
+
+    private var hasEnclaveKeys: Bool {
+        vault.identities.contains { $0.type == .secureEnclaveTag || $0.type == .secureEnclaveTagPQ }
+    }
+
+    private var biometricOnlyConfirmMessage: String {
+        let what = String(localized: "Only \(biometryName) or your app password or PIN will open the vault. The device passcode won't. If \(biometryName) is reset or changed in the Settings app, \(biometryName) stops opening the vault until you enter your password or PIN once.")
+        if hasPassword { return what }
+        return what + " " + String(localized: "Set a password or PIN first. It's the way back in.")
+    }
 
     private var biometricWord: String {
         switch BiometricGate.availableBiometric() {
         case .faceID:  return "Face ID"
         case .touchID: return "Touch ID"
         case .opticID: return "Optic ID"
-        case .none:    return "Passcode"
+        case .none:    return String(localized: "Passcode")
         }
     }
 
-    private var duressSheetTitle: String {
-        hasDuress ? "Change duress \(secretNoun)" : "Set a duress \(secretNoun)"
+    private var duressSheetTitle: LocalizedStringKey {
+        if hasDuress {
+            return "Change duress \(secretNoun)"
+        }
+        return "Set a duress \(secretNoun)"
+    }
+
+    private var passwordSheetTitle: LocalizedStringKey {
+        if hasPassword {
+            return "Change \(secretNoun)"
+        }
+        return "Set a password or PIN"
     }
 
     /// Run `action` once the owner has proved it's them (L-15): the app
@@ -295,7 +430,7 @@ struct LockSettingsView: View {
         }
         Task {
             do {
-                try await BiometricGate.authenticate(reason: "Confirm it's you to change how AgePony locks")
+                try await BiometricGate.authenticate(reason: String(localized: "Confirm it's you to change how AgePony locks"))
                 action()
             } catch BiometricGateError.unavailable {
                 action()
@@ -330,20 +465,21 @@ struct LockSettingsView: View {
     private func readable(_ error: Error) -> String {
         if let e = error as? VaultError {
             switch e {
-            case .duressEqualsReal:       return "The duress \(secretNoun) must be different from your real one."
-            case .realEqualsDuress:       return "Your \(secretNoun) must be different from the duress \(secretNoun)."
-            case .weakSecret(let why):    return why
-            case .kindLockedByDuress:     return "Remove the duress \(secretNoun) first to switch between a password and a PIN."
-            case .lockModeLockedByDuress: return "Remove the duress \(secretNoun) to use \(biometricWord)."
-            case .passwordIsOnlyUnlock:   return "Your \(secretNoun) is the only way into the vault. Choose \(biometricWord) above before removing it."
-            case .noAppPassword:          return "Set an app password first."
-            case .notUnlocked:            return "Unlock the vault first."
-            case .lockedOut(let millis):  return UnlockAttempts.lockoutMessage(millis: millis)
-            default:                      return "Something went wrong. Try again."
+            case .duressEqualsReal:       return String(localized: "The duress \(secretNoun) must be different from your real one.")
+            case .realEqualsDuress:       return String(localized: "Your \(secretNoun) must be different from the duress \(secretNoun).")
+            case .weakSecret:             return UserMessage.text(for: e, fallback: String(localized: "That \(secretNoun) is too short."))
+            case .kindLockedByDuress:     return String(localized: "Remove the duress \(secretNoun) first to switch between a password and a PIN.")
+            case .lockModeLockedByDuress: return String(localized: "Remove the duress \(secretNoun) to use \(biometricWord).")
+            case .passwordIsOnlyUnlock:   return String(localized: "Your \(secretNoun) is the only way into the vault. Choose \(biometricWord) above before removing it.")
+            case .noAppPassword:          return String(localized: "Set an app password first.")
+            case .notUnlocked:            return String(localized: "Unlock the vault first.")
+            case .lockedOut(let millis):  return UserMessage.lockout(millis: millis)
+            case .wrongPassword:          return String(localized: "Wrong \(secretNoun).")
+            case .vaultFileMissing, .malformedVaultFile, .decryptionFailed:
+                return UserMessage.text(for: e, fallback: String(localized: "Couldn't change the lock settings."))
             }
         }
-        if let e = error as? BiometricGateError, case .failed(let msg) = e { return msg }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't change the lock settings."))
     }
 }
 
@@ -370,10 +506,11 @@ private struct ReauthSheet: View {
                         .keyboardType(vault.unlockSecretKind == .pin ? .numberPad : .default)
                         .onSubmit(check)
                 } footer: {
-                    if let message { Text(message).foregroundStyle(.red) }
+                    if let message { StatusText(message) }
                     else { Text("Confirm it's you before changing how AgePony locks.") }
                 }
             }
+            .textCase(nil)
             .navigationTitle("Enter your \(noun)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -399,12 +536,12 @@ private struct ReauthSheet: View {
                 if try await vault.verifyAppPassword(entered) {
                     onSuccess()
                 } else {
-                    message = "Wrong \(noun)."
+                    message = String(localized: "Wrong \(noun).")
                 }
             } catch VaultError.lockedOut(let millis) {
-                message = UnlockAttempts.lockoutMessage(millis: millis)
+                message = UserMessage.lockout(millis: millis)
             } catch {
-                message = "Couldn't check the \(noun)."
+                message = UserMessage.text(for: error, fallback: String(localized: "Couldn't check the \(noun)."))
             }
         }
     }
@@ -417,7 +554,7 @@ private struct ReauthSheet: View {
 /// offers the password/PIN kind choice.
 struct SecretEntrySheet: View {
 
-    let title: String
+    let title: LocalizedStringKey
     let allowKindChange: Bool
     let onSave: (_ secret: String, _ kind: UnlockSecretKind) -> Void
 
@@ -426,7 +563,7 @@ struct SecretEntrySheet: View {
     @State private var secret = ""
     @State private var confirm = ""
 
-    init(title: String, kind: UnlockSecretKind, allowKindChange: Bool,
+    init(title: LocalizedStringKey, kind: UnlockSecretKind, allowKindChange: Bool,
          onSave: @escaping (_ secret: String, _ kind: UnlockSecretKind) -> Void) {
         self.title = title
         self.allowKindChange = allowKindChange
@@ -437,8 +574,8 @@ struct SecretEntrySheet: View {
     private var isPIN: Bool { kind == .pin }
 
     private var validationError: String? {
-        if let problem = PasswordKeyBlob.policyError(secret: secret, isPIN: isPIN) { return problem }
-        if secret != confirm { return "The two entries don't match." }
+        if let problem = UserMessage.secretPolicyProblem(secret: secret, isPIN: isPIN) { return problem }
+        if secret != confirm { return String(localized: "The two entries don't match.") }
         return nil
     }
 
@@ -454,20 +591,30 @@ struct SecretEntrySheet: View {
                 }
 
                 Section {
-                    SecureField(isPIN ? "PIN" : "Password", text: $secret)
-                        .textContentType(.newPassword)
-                        .keyboardType(isPIN ? .numberPad : .default)
-                    SecureField(isPIN ? "Confirm PIN" : "Confirm password", text: $confirm)
-                        .textContentType(.newPassword)
-                        .keyboardType(isPIN ? .numberPad : .default)
+                    if isPIN {
+                        SecureField("PIN", text: $secret)
+                            .textContentType(.newPassword)
+                            .keyboardType(.numberPad)
+                        SecureField("Confirm PIN", text: $confirm)
+                            .textContentType(.newPassword)
+                            .keyboardType(.numberPad)
+                    } else {
+                        SecureField("Password", text: $secret)
+                            .textContentType(.newPassword)
+                        SecureField("Confirm password", text: $confirm)
+                            .textContentType(.newPassword)
+                    }
                 } footer: {
                     if let err = validationError, !secret.isEmpty || !confirm.isEmpty {
-                        Text(err).foregroundStyle(.red)
+                        StatusText(err)
+                    } else if isPIN {
+                        Text("At least \(PasswordKeyBlob.minPINLength) digits.")
                     } else {
-                        Text(isPIN ? "At least \(PasswordKeyBlob.minPINLength) digits." : "At least \(PasswordKeyBlob.minPasswordLength) characters.")
+                        Text("At least \(PasswordKeyBlob.minPasswordLength) characters.")
                     }
                 }
             }
+            .textCase(nil)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

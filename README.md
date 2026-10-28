@@ -22,8 +22,9 @@ accounts, no servers, no tracking.
 - **Moving keys**: send keys to another phone (iPhone or Android) over local Wi-Fi,
   encrypted to a one-time post-quantum key, or print a paper backup that is itself
   a passphrase-protected age file.
-- On-device vault behind Face ID or the device passcode, or an AgePony password,
-  with an optional duress password that wipes it. No telemetry (see
+- On-device vault behind Face ID or the device passcode, Face ID alone (no
+  passcode fallback), or an AgePony password, with an optional duress password
+  that wipes it. No telemetry (see
   `AgePony/PrivacyInfo.xcprivacy`). The only network request is the optional
   fetch of a GitHub user's public SSH keys.
 
@@ -33,7 +34,9 @@ The cryptography lives in `Sources/AgePonyCore`, a dependency-free Swift package
 (CryptoKit + Security + CommonCrypto). It has no UIKit or app dependencies and can
 be reused on its own. It implements age, SSH key parsing, SSHSIG, the FIDO/CTAP2
 and PIN-protocol stack, and a USTAR archiver, each pinned to reference vectors in
-`Tests/AgePonyCoreTests`.
+`Tests/AgePonyCoreTests`. The decrypt path also runs against all 147 vectors of the
+C2SP CCTV age test suite (`Tests/AgePonyCoreTests/Testkit`); the few cases where
+AgePony deliberately differs are listed with reasons in `RUNNER-NOTES.md` there.
 
 ### Post-quantum recipients
 
@@ -41,8 +44,12 @@ AgePonyCore implements the standardized post-quantum age recipient,
 MLKEM768-X25519 — `age1pq1…` public keys and `mlkem768x25519` stanzas —
 interoperable with the `age` CLI v1.3.0 and later.
 
-Neither half of the construction is available from Apple's frameworks at this
-deployment target, so both are implemented from scratch:
+On iOS 26 and macOS 26 the X-Wing and ML-KEM-768 steps run on CryptoKit
+(`Crypto/HybridKEMBackend.swift`, `Crypto/CryptoKitPQ.swift`). AgePony's own
+validation of stanzas and keys still runs first, and the MLKEM768-P256 combiner,
+HPKE key schedule and SHA-3 stay AgePony's code, since CryptoKit has none of them.
+Below iOS 26 neither half is available from Apple's frameworks, so both are
+implemented from scratch:
 
 | File | What it is |
 | --- | --- |
@@ -75,8 +82,10 @@ The known-answer tests use the vectors from age's own `age-plugin-tagtest`.
 In the app, the P-256 private key is generated in the Secure Enclave
 (`Hardware/SecureEnclaveKeyAgreement.swift`) and can't be exported; the vault keeps
 only the Enclave's opaque handle, which no other device can use. For `age1tagpq1`
-the ML-KEM-768 seed is kept in the encrypted vault, since the Enclave only gained
-ML-KEM in iOS 26. Hardware identities are left out of key transfer and paper
+keys made on iOS 26 or later, the ML-KEM-768 half is a Secure Enclave key as well
+(`Hardware/SecureEnclaveMLKEM.swift`, `Hardware/SecureEnclaveTagPQ.swift`), so
+neither half can leave the phone. Keys made before 5.1.0 or below iOS 26 keep the
+ML-KEM-768 seed in the encrypted vault. Hardware identities are left out of key transfer and paper
 backups, so they stay on the phone that made them.
 
 `PIV/` and `Stanzas/YubiKeyIdentity.swift` decrypt files encrypted to a YubiKey PIV

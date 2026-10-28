@@ -32,6 +32,8 @@ public enum HybridKEMError: Error, Equatable {
     case invalidPublicKeyLength
     case invalidEncapsulationLength
     case invalidTestRandomLength
+    /// The X25519 half produced the all-zero shared secret (identity or low-order point).
+    case lowOrderPoint
 }
 
 public enum HpkeMlkem768X25519 {
@@ -112,12 +114,14 @@ public enum HpkeMlkem768X25519 {
         let priv = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKey)
         let pub = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerPublicKey)
         let shared = try priv.sharedSecretFromKeyAgreement(with: pub)
-        return shared.withUnsafeBytes { Data($0) }
+        let bytes = shared.withUnsafeBytes { Data($0) }
+        guard bytes.contains(where: { $0 != 0 }) else { throw HybridKEMError.lowOrderPoint }
+        return bytes
     }
 
     // MARK: - KEM
 
-    private static func publicKeyParts(_ pk: Data) throws -> (ekPQ: Data, ekT: Data) {
+    static func publicKeyParts(_ pk: Data) throws -> (ekPQ: Data, ekT: Data) {
         guard pk.count == publicKeySize else { throw HybridKEMError.invalidPublicKeyLength }
         return (Data(pk.prefix(MLKEM768.encapsulationKeySize)), Data(pk.suffix(32)))
     }
@@ -199,6 +203,11 @@ public enum HpkeMlkem768X25519 {
         plaintext: Data,
         testRandom: Data?
     ) throws -> (enc: Data, ciphertext: Data) {
+        // 5.1.0 RC3 (E8): CryptoKit on iOS 26 / macOS 26, except for known-answer tests.
+        if testRandom == nil,
+           let sealed = try cryptoKitSeal(publicKey: publicKey, info: info, plaintext: plaintext) {
+            return sealed
+        }
         let (sharedSecret, enc) = try encap(publicKey: publicKey, testRandom: testRandom)
         let ctx = keySchedule(sharedSecret: sharedSecret, info: info)
         let nonce = try ChaChaPoly.Nonce(data: ctx.baseNonce)
@@ -209,6 +218,44 @@ public enum HpkeMlkem768X25519 {
             authenticating: Data()
         )
         return (enc, sealed.ciphertext + sealed.tag)
+    }
+
+    /// The CryptoKit seal (HybridKEMBackend), or nil where it doesn't run. AgePony's
+    /// recipient checks come first, in the own code's order and with its errors: length,
+    /// FIPS 203 modulus check (audit L-12), then the low-order X25519 refusal, done with
+    /// the same `x25519Exchange` the own code uses. No own-code retry: a CryptoKit throw
+    /// after the checks maps to the own code's error for that failure (`mapSealError`).
+    private static func cryptoKitSeal(
+        publicKey: Data,
+        info: Data,
+        plaintext: Data
+    ) throws -> (enc: Data, ciphertext: Data)? {
+        #if (os(iOS) || os(macOS)) && compiler(>=6.2)
+        if #available(iOS 26, macOS 26, *), !HybridKEMBackend.forceOwnCode {
+            let (ekPQ, ekT) = try publicKeyParts(publicKey)
+            guard MLKEM768.isValidEncapsulationKey(ekPQ) else { throw MLKEMError.malformedEncapsulationKey }
+            _ = try x25519Exchange(privateKey: MLKEM768.randomBytes(32), peerPublicKey: ekT)
+            let sealed: (enc: Data, ciphertext: Data)
+            do {
+                sealed = try CryptoKitXWing.seal(publicKey: publicKey, info: info, plaintext: plaintext)
+            } catch {
+                throw mapSealError(error)
+            }
+            guard sealed.enc.count == encSize else { throw HybridKEMError.invalidEncapsulationLength }
+            return sealed
+        }
+        #endif
+        return nil
+    }
+
+    /// A CryptoKit seal failure after the recipient checks passed, as the own code reports
+    /// it: its own errors and CryptoKit's (`CryptoKitError`, which the own code's X25519
+    /// and ChaChaPoly calls throw too) as they are; anything else (an HPKE error type the
+    /// own code doesn't have) as the key being unusable, `HybridKEMError.invalidPublicKeyLength`
+    /// ("That quantum-safe key is damaged.").
+    static func mapSealError(_ error: Error) -> Error {
+        if error is HybridKEMError || error is MLKEMError || error is CryptoKitError { return error }
+        return HybridKEMError.invalidPublicKeyLength
     }
 
     /// Open a ciphertext produced by `seal` for `enc` under `info`.

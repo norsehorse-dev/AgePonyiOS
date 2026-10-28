@@ -41,6 +41,15 @@ public enum PivSession {
         return key
     }
 
+    /// `readKey`, plus the slot's PIN policy from GET METADATA in the same tap (5.1.0
+    /// item 1). Firmware before 5.3 doesn't have the command and gives `.unknown`; a
+    /// failed metadata read never fails the key read.
+    public static func readKeyAndPINPolicy(_ card: PivCard, stub: YubiKeyStub) throws -> (key: Data, pinPolicy: YubiKeyPINPolicy) {
+        let key = try readKey(card, stub: stub)
+        let policy = (try? Piv.pinPolicy(card, slot: stub.slot)) ?? .unknown
+        return (key, policy)
+    }
+
     /// Run one ECDH per point in the stub's slot and return the shared x-coordinates
     /// keyed by point, for a `RecordedKeyAgreement`. With `pin`, the PIN is verified
     /// first; without it, a slot whose PIN policy wants one throws `.pinRequired`
@@ -66,17 +75,24 @@ extension YubiKeyIdentity {
 
 extension YubiKeyStub {
     /// What an `age-plugin-yubikey` identity file (or a bare stub line) holds: the
-    /// stub and, when the file has its `# Recipient:` comment, the public key, which
-    /// saves a tap on import. A recipient that doesn't belong to the stub is ignored.
-    public static func parseIdentityFile(_ text: String) throws -> (stub: YubiKeyStub, publicKey: Data?) {
+    /// stub; when the file has its `# Recipient:` comment, the public key, which saves a
+    /// tap on import; and the slot's PIN policy from its `#    PIN policy:` comment
+    /// (5.1.0 item 1), `.unknown` without one. A recipient that doesn't belong to the
+    /// stub is ignored.
+    public static func parseIdentityFile(_ text: String) throws -> (stub: YubiKeyStub, publicKey: Data?, pinPolicy: YubiKeyPINPolicy) {
         var stub: YubiKeyStub?
         var recipientKey: Data?
+        var pinPolicy = YubiKeyPINPolicy.unknown
         for raw in text.split(whereSeparator: \.isNewline) {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("#") {
                 if let r = line.range(of: "age1yubikey1", options: .caseInsensitive) {
                     let token = line[r.lowerBound...].prefix { !$0.isWhitespace }
                     recipientKey = try? P256Recipient(ageRecipient: String(token).lowercased()).compressedPublicKey
+                } else if stub == nil, let value = pinPolicyComment(line) {
+                    // Comments come before their stub: only the first identity's
+                    // block counts, as only the first stub is read.
+                    pinPolicy = YubiKeyPINPolicy(identityFileValue: value)
                 }
             } else if stub == nil, isStub(line) {
                 stub = try YubiKeyStub(parsing: line)
@@ -84,8 +100,16 @@ extension YubiKeyStub {
         }
         guard let stub else { throw YubiKeyError.notAStub }
         if let key = recipientKey, stub.matchesKey(compressedPublicKey: key) {
-            return (stub, key)
+            return (stub, key, pinPolicy)
         }
-        return (stub, nil)
+        return (stub, nil, pinPolicy)
+    }
+
+    /// The text after `PIN policy:` in a comment line, or nil for any other line.
+    static func pinPolicyComment(_ line: String) -> String? {
+        let body = line.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
+        let label = "PIN policy:"
+        guard body.lowercased().hasPrefix(label.lowercased()) else { return nil }
+        return String(body.dropFirst(label.count))
     }
 }

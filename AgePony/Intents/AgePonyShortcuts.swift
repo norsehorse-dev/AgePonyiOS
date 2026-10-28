@@ -20,7 +20,7 @@ struct AgePonyShortcuts: AppShortcutsProvider {
                 "Encrypt a file with \(.applicationName)",
                 "Passphrase encrypt with \(.applicationName)"
             ],
-            shortTitle: "Encrypt with Passphrase",
+            shortTitle: "Encrypt with passphrase",
             systemImageName: "lock.doc"
         )
     }

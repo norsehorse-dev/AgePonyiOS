@@ -27,6 +27,8 @@ struct SignFileView: View {
     @State private var selectedIdentityID: UUID?
     @State private var working: Bool = false
     @State private var errorMessage: String?
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     @State private var resultURL: URL?
 
     @State private var showFilePicker: Bool = false
@@ -59,11 +61,18 @@ struct SignFileView: View {
                 contentForStage
             }
         }
+        .ownerCheck(ownerCheck, vault: vault)
         .navigationTitle("Sign a file")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { cleanupAndDismiss() }
+            if stage == .done && !signingIdentities.isEmpty {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { finishAfterSuccess() }
+                }
+            } else {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { cleanupAndDismiss() }
+                }
             }
         }
         .onAppear {
@@ -85,14 +94,6 @@ struct SignFileView: View {
                     selectedIdentityID = defaultSigningIdentityID
                 }
             }
-        }
-        .alert(
-            "Sign failed",
-            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
         }
         .sheet(isPresented: $pinPromptVisible) {
             SecurityKeyPinPrompt(
@@ -128,44 +129,34 @@ struct SignFileView: View {
     }
 
     private var noSigningKeyStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "signature")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("No signing key yet")
-                .font(AgePonyTypography.title)
-            Text("Signing needs an SSH key. Your age (X25519) identities can encrypt and decrypt, but only an SSH key can produce a signature. Create one and pick \"SSH key\" when prompted.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
-            Button("Create an SSH key") { showCreateKey = true }
-                .buttonStyle(.agePonyPrimary)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
+        ContentUnavailableView {
+            Label("No signing key", systemImage: "signature")
+        } description: {
+            Text("Signing needs an SSH key or a Secure Enclave signing key. Your age identities can encrypt and decrypt, but they can't sign.")
+        } actions: {
+            Button("Create a signing key") { showCreateKey = true }
         }
     }
 
     private var pickFileStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "doc.badge.ellipsis")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Pick a file to sign")
-                .font(AgePonyTypography.title)
-            Text("AgePony produces a detached signature (a .sig file) you can share alongside the original. It proves the file came from you and hasn't changed.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
-            Button("Pick from Files…") { showFilePicker = true }
-                .buttonStyle(.agePonyPrimary)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
+        Form {
+            Section {
+                Button("Choose a file…") { showFilePicker = true }
+            } footer: {
+                Text("AgePony makes a detached signature (a .sig file) to share alongside the original. It shows the file came from you and hasn't changed.")
+            }
+            errorSection
+        }
+        .textCase(nil)
+    }
+
+    /// The last failure, under the action that caused it.
+    @ViewBuilder
+    private var errorSection: some View {
+        if let errorMessage {
+            Section {
+                StatusText(errorMessage)
+            }
         }
     }
 
@@ -175,20 +166,19 @@ struct SignFileView: View {
                 if let url = sourceURL {
                     HStack {
                         Image(systemName: "doc")
-                            .foregroundStyle(AgePonyColors.tealCore)
-                        VStack(alignment: .leading, spacing: 2) {
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(url.lastPathComponent)
-                                .font(AgePonyTypography.bodyEmph)
+                                .font(AgePonyTypography.body)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Text(ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file))
-                                .font(AgePonyTypography.caption)
+                                .font(AgePonyTypography.subheadline)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
                         Button("Change") { showFilePicker = true }
-                            .font(AgePonyTypography.footnote)
-                            .foregroundStyle(AgePonyColors.tealCore)
+                            .buttonStyle(.borderless)
                     }
                 }
             } header: {
@@ -198,7 +188,7 @@ struct SignFileView: View {
             Section {
                 Picker("Signing identity", selection: $selectedIdentityID) {
                     ForEach(signingIdentities) { id in
-                        Text(id.name).tag(Optional(id.id))
+                        Text(KeyPickerText.menuLine(id)).tag(Optional(id.id))
                     }
                 }
                 .pickerStyle(.menu)
@@ -230,15 +220,17 @@ struct SignFileView: View {
                 .listRowBackground(Color.clear)
                 .disabled(!canSign)
             }
+
+            errorSection
         }
+        .textCase(nil)
     }
 
     private var signingStage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Spacer()
             ProgressView()
                 .controlSize(.large)
-                .tint(AgePonyColors.tealCore)
             Text("Signing…")
                 .font(AgePonyTypography.headline)
                 .foregroundStyle(.secondary)
@@ -247,42 +239,44 @@ struct SignFileView: View {
     }
 
     private var doneStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Signed")
-                .font(AgePonyTypography.title)
-            if let url = resultURL {
-                Text(url.lastPathComponent)
-                    .font(AgePonyTypography.monoCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer()
-            VStack(spacing: 12) {
+        Form {
+            Section {
+                StatusText("Signed", kind: .success, verdict: true)
+                    .font(AgePonyTypography.headline)
                 if let url = resultURL {
+                    LabeledContent("Signature file") {
+                        Text(url.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                if let id = selectedIdentityID, let identity = signingIdentities.first(where: { $0.id == id }) {
+                    LabeledContent("Signed by", value: identity.name)
+                }
+            } footer: {
+                Text("Share the .sig file together with the original file.")
+            }
+
+            if let url = resultURL {
+                Section {
                     ShareLink(item: url) {
                         Text("Share signature")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.agePonyPrimary)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 }
-                Button("Sign another") {
+            }
+
+            Section {
+                Button("Sign another file") {
                     resetForAnother()
                 }
-                .buttonStyle(.agePonySecondary)
-                Button("Done") {
-                    finishAfterSuccess()
-                }
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
         }
+        .textCase(nil)
         .onAppear {
             ReviewPrompter.recordSuccessfulOperation()
         }
@@ -318,9 +312,10 @@ struct SignFileView: View {
         do {
             let urls = try result.get()
             guard let url = urls.first else { return }
+            errorMessage = nil
             preloadFile(url)
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't open the file you picked."))
         }
     }
 
@@ -332,12 +327,12 @@ struct SignFileView: View {
         if vault.biometricEnabled {
             Task {
                 do {
-                    try await BiometricGate.authenticate(reason: "Sign \"\(url.lastPathComponent)\" with your private key.")
+                    try await ownerCheck.authenticate(vault, reason: String(localized: "Sign \"\(url.lastPathComponent)\" with your private key."))
                     runSign(url: url, identity: identity)
                 } catch BiometricGateError.userCancelled {
                     // Stay on the configure screen.
                 } catch {
-                    errorMessage = error.localizedDescription
+                    errorMessage = UserMessage.text(for: error, fallback: BiometricGate.didNotConfirmText)
                 }
             }
         } else {
@@ -346,6 +341,7 @@ struct SignFileView: View {
     }
 
     private func runSign(url: URL, identity: StoredIdentity) {
+        errorMessage = nil
         if identity.isSecurityKey {
             runSecurityKeySign(url: url, identity: identity, pin: nil)
             return
@@ -390,7 +386,7 @@ struct SignFileView: View {
                 }
             } catch let e as SecurityKeyError where e.indicatesWrongPin {
                 await MainActor.run {
-                    pinErrorText = "The PIN was incorrect. Try again."
+                    pinErrorText = String(localized: "The PIN was incorrect. Try again.")
                     pinSubmitting = false
                     pinPromptVisible = true
                     stage = .configure
@@ -405,7 +401,7 @@ struct SignFileView: View {
                     working = false
                 }
             } catch {
-                let description = describe(error)
+                let description: String? = UserMessage.isCancellation(error) ? nil : describe(error)
                 await MainActor.run {
                     pinPromptVisible = false
                     errorMessage = description
@@ -415,7 +411,7 @@ struct SignFileView: View {
             }
         }
 #else
-        errorMessage = "Security keys require NFC, which isn't available here."
+        errorMessage = String(localized: "Security keys require NFC, which isn't available here.")
         stage = .configure
         working = false
 #endif
@@ -440,18 +436,6 @@ struct SignFileView: View {
     }
 
     private func describe(_ error: Error) -> String {
-        if let e = error as? FileSignerError {
-            switch e {
-            case .identityCannotSign:          return "That identity can't sign. Use an SSH key."
-            case .keyTypeNotYetSupported:
-                return "That key type isn't supported for signing yet."
-            case .malformedIdentityMaterial:   return "The identity's key material looks corrupted."
-            case .readFailed(let m):           return "Couldn't read the file: \(m)"
-            case .writeFailed(let m):          return "Couldn't write the signature: \(m)"
-            case .signError(let m):            return "Signing failed: \(m)"
-            case .requiresSecurityKey:         return "This identity signs with your security key — tap it to sign."
-            }
-        }
-        return error.localizedDescription
+        UserMessage.text(for: error, fallback: String(localized: "Couldn't sign the file."))
     }
 }

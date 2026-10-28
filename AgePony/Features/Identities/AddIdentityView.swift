@@ -26,29 +26,21 @@ struct AddIdentityView: View {
     var body: some View {
         switch stage {
         case .choice:
-            VStack(spacing: 24) {
-                VStack(spacing: 8) {
-                    Text("Add identity")
-                        .font(AgePonyTypography.title)
-                    Text("Generate a fresh age identity, or import an existing age or SSH key.")
-                        .font(AgePonyTypography.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
+            Form {
+                Section {
+                    Button { stage = .generate } label: {
+                        Label("Generate a new identity", systemImage: "key")
+                    }
+                    .foregroundStyle(.primary)
+                    Button { stage = .importExisting } label: {
+                        Label("Import an existing identity", systemImage: "square.and.arrow.down")
+                    }
+                    .foregroundStyle(.primary)
+                } footer: {
+                    Text("Generate a new age identity, or import an age key, an SSH key or a YubiKey identity you already use.")
                 }
-                .padding(.top, 24)
-
-                Spacer()
-
-                VStack(spacing: 14) {
-                    Button("Generate new identity") { stage = .generate }
-                        .buttonStyle(.agePonyPrimary)
-                    Button("Import existing identity") { stage = .importExisting }
-                        .buttonStyle(.agePonySecondary)
-                }
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
             }
+            .textCase(nil)
             .navigationTitle("Add identity")
             .navigationBarTitleDisplayMode(.inline)
 

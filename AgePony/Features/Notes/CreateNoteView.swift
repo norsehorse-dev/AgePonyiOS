@@ -72,7 +72,6 @@ struct CreateNoteView: View {
                         .textInputAutocapitalization(.never)
                 }
                 Toggle("Show passphrase", isOn: $showPassphrase)
-                    .font(AgePonyTypography.footnote)
 
                 if !wordlist.isEmpty {
                     Button {
@@ -82,15 +81,13 @@ struct CreateNoteView: View {
                             showPassphrase = true
                         }
                     } label: {
-                        Label("Generate a passphrase", systemImage: "wand.and.stars")
-                            .font(AgePonyTypography.footnote)
+                        Label("Generate a passphrase", systemImage: "dice")
                     }
                 }
 
                 if !passphraseConfirm.isEmpty && passphrase != passphraseConfirm {
-                    Text("Passphrases don't match.")
-                        .font(AgePonyTypography.caption)
-                        .foregroundStyle(AgePonyColors.destructive)
+                    StatusText("Passphrases don't match.")
+                        .font(AgePonyTypography.footnote)
                 }
             } header: {
                 Text("Passphrase")
@@ -115,21 +112,20 @@ struct CreateNoteView: View {
                 .listRowBackground(Color.clear)
                 .disabled(saveDisabled)
             }
+
+            if let errorMessage {
+                Section {
+                    StatusText(errorMessage)
+                }
+            }
         }
+        .textCase(nil)
         .navigationTitle("New note")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
             }
-        }
-        .alert(
-            "Save failed",
-            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
         }
         .interactiveDismissDisabled(saving)
     }
@@ -141,10 +137,11 @@ struct CreateNoteView: View {
     }
 
     private func save() {
+        errorMessage = nil
         saving = true
         let bodyData = Data(noteBody.utf8)
         let titleSnapshot = title.trimmingCharacters(in: .whitespaces).isEmpty
-            ? "Untitled"
+            ? String(localized: "Untitled")
             : title.trimmingCharacters(in: .whitespaces)
         let passphraseSnapshot = passphrase
 
@@ -172,13 +169,13 @@ struct CreateNoteView: View {
                         onDone()
                         dismiss()
                     } catch {
-                        errorMessage = error.localizedDescription
+                        errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't save the note to the vault."))
                         saving = false
                     }
                 }
             } catch {
                 DispatchQueue.main.async {
-                    errorMessage = String(describing: error)
+                    errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the note."))
                     saving = false
                 }
             }

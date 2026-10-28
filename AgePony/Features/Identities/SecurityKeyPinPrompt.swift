@@ -35,12 +35,13 @@ struct SecurityKeyPinPrompt: View {
                     Text("Security key PIN")
                 } footer: {
                     if let errorText {
-                        Text(errorText).foregroundStyle(.red)
+                        StatusText(errorText)
                     } else {
-                        Text("Your key's own FIDO2 PIN — the one set on the key itself, not your phone passcode.")
+                        Text("Your key's own FIDO2 PIN: the one set on the key itself, not your phone passcode.")
                     }
                 }
             }
+            .textCase(nil)
             .navigationTitle("Enter PIN")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(submitting)

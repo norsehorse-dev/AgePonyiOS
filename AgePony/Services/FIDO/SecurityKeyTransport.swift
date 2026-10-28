@@ -50,25 +50,25 @@ public enum SecurityKeyError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .nfcUnavailable:
-            return "NFC isn't available on this device."
+            return String(localized: "NFC isn't available on this device.")
         case .wrongAppletSelected(let aid):
-            return "The tapped key didn't expose a FIDO applet (got \(aid ?? "none"))."
+            return String(localized: "The tapped key didn't expose a FIDO applet (got \(aid ?? "none")).")
         case .notAnISO7816Tag:
-            return "That tag isn't a security key."
+            return String(localized: "That tag isn't a security key.")
         case .emptyResponse:
-            return "The security key returned no data."
+            return String(localized: "The security key returned no data.")
         case .apduFailed(let sw1, let sw2):
-            return String(format: "The security key reported APDU error %02X%02X.", sw1, sw2)
+            return String(localized: "The security key refused the command (status \(String(format: "%02X%02X", sw1, sw2))).")
         case .keepaliveTimedOut:
-            return "The security key took too long to respond."
+            return String(localized: "The security key took too long to respond.")
         case .ctapError(let code):
             return SecurityKeyError.ctapMessage(code)
         case .pinAgreementNotP256:
-            return "The key returned an unexpected key-agreement type."
+            return String(localized: "The key returned an unexpected key-agreement type.")
         case .cancelled:
-            return "Cancelled."
+            return String(localized: "Cancelled.")
         case .malformedCommand:
-            return "AgePony built a command the key can't take."
+            return String(localized: "AgePony built a command the key can't take.")
         }
     }
 
@@ -87,17 +87,17 @@ public enum SecurityKeyError: Error, LocalizedError {
 
     private static func ctapMessage(_ code: UInt8) -> String {
         switch code {
-        case 0x19: return "The operation was denied on the key."
-        case 0x27: return "A credential already exists on this key for AgePony."
-        case 0x2E: return "This key has no matching credential — is it the right key?"
-        case 0x31: return "The PIN was incorrect."
-        case 0x32: return "The key's PIN is blocked. Reset the key's FIDO PIN to recover."
-        case 0x33: return "PIN authentication failed. Try again."
-        case 0x34: return "Too many PIN attempts. Remove and re-tap the key, then try again."
-        case 0x35: return "This key has no PIN set."
-        case 0x36: return "This key requires its PIN."
-        case 0x38: return "The PIN session expired. Try again."
-        default:   return String(format: "The security key reported CTAP error 0x%02X.", code)
+        case 0x19: return String(localized: "The operation was denied on the key.")
+        case 0x27: return String(localized: "A credential already exists on this key for AgePony.")
+        case 0x2E: return String(localized: "This key has no matching credential. Is it the right key?")
+        case 0x31: return String(localized: "The PIN was incorrect.")
+        case 0x32: return String(localized: "The key's PIN is blocked. Reset the key's FIDO PIN to recover.")
+        case 0x33: return String(localized: "PIN authentication failed. Try again.")
+        case 0x34: return String(localized: "Too many PIN attempts. Remove and re-tap the key, then try again.")
+        case 0x35: return String(localized: "This key has no PIN set.")
+        case 0x36: return String(localized: "This key requires its PIN.")
+        case 0x38: return String(localized: "The PIN session expired. Try again.")
+        default:   return String(localized: "The security key refused the request (CTAP error \(String(format: "0x%02X", code))).")
         }
     }
 }
@@ -307,7 +307,7 @@ public final class SecurityKeyTransport: NSObject, NFCTagReaderSessionDelegate {
     }
 
     private func end(error: Error) {
-        session?.invalidate(errorMessage: (error as? LocalizedError)?.errorDescription ?? "Failed.")
+        session?.invalidate(errorMessage: UserMessage.text(for: error, fallback: String(localized: "The key couldn't be read.")))
         session = nil
     }
 
@@ -329,14 +329,14 @@ public final class SecurityKeyTransport: NSObject, NFCTagReaderSessionDelegate {
 
     public func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
         guard let first = tags.first, case let .iso7816(iso) = first else {
-            session.invalidate(errorMessage: "That isn't a security key.")
+            session.invalidate(errorMessage: String(localized: "That isn't a security key."))
             resumeConnect(throwing: SecurityKeyError.notAnISO7816Tag)
             return
         }
         session.connect(to: first) { [weak self] error in
             guard let self = self else { return }
             if let error = error {
-                session.invalidate(errorMessage: "Couldn't connect to the key.")
+                session.invalidate(errorMessage: String(localized: "Couldn't connect to the key."))
                 self.resumeConnect(throwing: error)
                 return
             }

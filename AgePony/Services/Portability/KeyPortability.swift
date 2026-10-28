@@ -17,7 +17,8 @@
 //                    priv = seed(32) || pub(32)         priv = 32-byte seed
 //    sshRSA          pub = SSH wire blob,               pub = UTF-8 `ssh-rsa BASE64 [comment]`,
 //                    priv = OpenSSH PEM                 priv = OpenSSH PEM
-//    yubikey         pub 33 compressed, priv 9 stub     same, "yubikeyPiv"
+//    yubikey         pub 33 compressed, priv 9 stub     same, "yubikeyPiv", plus optional
+//                    pinPolicy (5.1.0)                  "pinPolicy": "required" | "notRequired"
 //    skEd25519 / skEcdsaP256: pub = sk wire, priv = credential id, same on both
 //
 //  Recipients follow the same split (ssh-ed25519 raw vs wire, ssh-rsa line vs wire;
@@ -53,6 +54,10 @@ struct WireIdentity: Codable, Equatable {
     var sshComment: String?
     var keystoreAlias: String?
     var createdAt: Int64
+    /// `yubikeyPiv` only (5.1.0): "required" or "notRequired"; left out when unknown.
+    /// Optional, so older readers on either platform ignore it and a missing value
+    /// reads as unknown.
+    var pinPolicy: String?
 }
 
 /// Android `StoredRecipient`.
@@ -92,7 +97,7 @@ struct IncomingSigner: Identifiable {
     /// instead of silently trusted more widely than it was (audit L-6).
     var refusalReason: String? {
         guard let o = options?.trimmingCharacters(in: .whitespaces), !o.isEmpty else { return nil }
-        return "It carries allowed_signers restrictions (\(o)) that AgePony on iPhone can't keep, so it isn't imported."
+        return String(localized: "It carries allowed_signers restrictions (\(o)) that AgePony on iPhone can't keep, so it isn't imported.")
     }
 }
 
@@ -291,8 +296,8 @@ enum KeyPortability {
     /// identity's name.
     static func nameClash(_ vault: Vault, _ signer: StoredSigner) -> String? {
         if isKnown(vault, signer) { return nil }
-        if vault.signers.contains(where: { sameName($0.name, signer.name) }) { return "a trusted signer" }
-        if vault.identities.contains(where: { sameName($0.name, signer.name) }) { return "one of your identities" }
+        if vault.signers.contains(where: { sameName($0.name, signer.name) }) { return String(localized: "a trusted signer") }
+        if vault.identities.contains(where: { sameName($0.name, signer.name) }) { return String(localized: "one of your identities") }
         return nil
     }
 
@@ -318,28 +323,28 @@ enum KeyPortability {
 
     static func typeLabel(_ t: StoredIdentityType) -> String {
         switch t {
-        case .x25519: return "age X25519"
-        case .postQuantum: return "Quantum-safe (ML-KEM-768 + X25519)"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA: return "SSH RSA"
-        case .secureEnclaveP256: return "Hardware key"
-        case .skEd25519: return "Security key (Ed25519)"
-        case .skEcdsaP256: return "Security key (P-256)"
-        case .secureEnclaveTag: return "Hardware key (age1tag)"
-        case .secureEnclaveTagPQ: return "Hardware key, quantum-safe (age1tagpq)"
-        case .yubikey: return "YubiKey (PIV)"
+        case .x25519: return String(localized: "age X25519")
+        case .postQuantum: return String(localized: "Quantum-safe (ML-KEM-768 + X25519)")
+        case .sshEd25519: return String(localized: "SSH Ed25519")
+        case .sshRSA: return String(localized: "SSH RSA")
+        case .secureEnclaveP256: return String(localized: "Hardware key")
+        case .skEd25519: return String(localized: "Security key (Ed25519)")
+        case .skEcdsaP256: return String(localized: "Security key (P-256)")
+        case .secureEnclaveTag: return String(localized: "Hardware key (age1tag)")
+        case .secureEnclaveTagPQ: return String(localized: "Hardware key, quantum-safe (age1tagpq)")
+        case .yubikey: return String(localized: "YubiKey (PIV)")
         }
     }
 
     static func typeLabel(_ t: StoredRecipientType) -> String {
         switch t {
-        case .x25519: return "age X25519"
-        case .postQuantum: return "Quantum-safe (ML-KEM-768 + X25519)"
-        case .sshEd25519: return "SSH Ed25519"
-        case .sshRSA: return "SSH RSA"
-        case .yubikey: return "YubiKey (P-256)"
-        case .tag: return "Hardware key (age1tag)"
-        case .tagPQ: return "Hardware key, quantum-safe (age1tagpq)"
+        case .x25519: return String(localized: "age X25519")
+        case .postQuantum: return String(localized: "Quantum-safe (ML-KEM-768 + X25519)")
+        case .sshEd25519: return String(localized: "SSH Ed25519")
+        case .sshRSA: return String(localized: "SSH RSA")
+        case .yubikey: return String(localized: "YubiKey (P-256)")
+        case .tag: return String(localized: "Hardware key (age1tag)")
+        case .tagPQ: return String(localized: "Hardware key, quantum-safe (age1tagpq)")
         }
     }
 
@@ -348,9 +353,9 @@ enum KeyPortability {
     static func unverifiableNote(_ identity: StoredIdentity) -> String? {
         switch identity.type {
         case .skEd25519, .skEcdsaP256:
-            return "Lives on a security key: its public key can't be checked without that key."
+            return String(localized: "Lives on a security key: its public key can't be checked without that key.")
         case .yubikey:
-            return "Lives on a YubiKey: decrypting with it needs that YubiKey."
+            return String(localized: "Lives on a YubiKey: decrypting with it needs that YubiKey.")
         default:
             return nil
         }
@@ -441,9 +446,11 @@ enum KeyPortability {
         case .skEcdsaP256: type = "skEcdsaP256"
         case .secureEnclaveTag, .secureEnclaveTagPQ, .secureEnclaveP256: return nil
         }
+        let policy = i.type == .yubikey ? i.yubiKeyPINPolicy : .unknown
         return WireIdentity(id: i.id.uuidString.lowercased(), name: i.name, type: type,
                             publicKeyB64: pub.base64EncodedString(), privateKeyB64: priv.base64EncodedString(),
-                            sshComment: i.sshComment, keystoreAlias: nil, createdAt: millis(i.createdAt))
+                            sshComment: i.sshComment, keystoreAlias: nil, createdAt: millis(i.createdAt),
+                            pinPolicy: policy == .unknown ? nil : policy.rawValue)
     }
 
     static func storedIdentity(_ w: WireIdentity) -> StoredIdentity? {
@@ -471,8 +478,11 @@ enum KeyPortability {
         case "skEcdsaP256": type = .skEcdsaP256
         default: return nil // hardware-bound on the sender, or a type this version doesn't know
         }
+        // A value this version doesn't know reads as unknown: the PIN is asked for first.
+        let pinPolicy = type == .yubikey ? w.pinPolicy.flatMap(YubiKeyPINPolicy.init(rawValue:)) : nil
         return StoredIdentity(id: UUID(), name: w.name, type: type, publicKeyMaterial: publicMaterial,
-                              privateKeyMaterial: privateMaterial, sshComment: comment, createdAt: date(w.createdAt))
+                              privateKeyMaterial: privateMaterial, sshComment: comment, createdAt: date(w.createdAt),
+                              pinPolicy: pinPolicy)
     }
 
     static func wire(_ r: StoredRecipient) -> WireRecipient? {
@@ -552,7 +562,8 @@ enum KeyPortability {
 
     private static func fresh(_ i: StoredIdentity) -> StoredIdentity {
         StoredIdentity(id: UUID(), name: i.name, type: i.type, publicKeyMaterial: i.publicKeyMaterial,
-                       privateKeyMaterial: i.privateKeyMaterial, sshComment: i.sshComment, createdAt: i.createdAt)
+                       privateKeyMaterial: i.privateKeyMaterial, sshComment: i.sshComment, createdAt: i.createdAt,
+                       pinPolicy: i.pinPolicy)
     }
 
     private static func fresh(_ r: StoredRecipient) -> StoredRecipient {

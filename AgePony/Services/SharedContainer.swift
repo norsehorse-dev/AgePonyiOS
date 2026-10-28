@@ -172,7 +172,7 @@ public enum SharedContainer {
             direction = self.direction(ofFileAt: destURL)
         } catch {
             try? FileManager.default.removeItem(at: dir)
-            throw SharedContainerError.writeFailed(error.localizedDescription)
+            throw SharedContainerError.writeFailed(failure(String(localized: "Couldn't copy the shared file into AgePony."), error))
         }
         let payload = SharedPayload(
             token: token,
@@ -209,8 +209,20 @@ public enum SharedContainer {
             try data.write(to: manifestURL, options: [.atomic, .completeFileProtection])
         } catch {
             try? FileManager.default.removeItem(at: dir)
-            throw SharedContainerError.writeFailed(error.localizedDescription)
+            throw SharedContainerError.writeFailed(failure(String(localized: "Couldn't save the shared item."), error))
         }
+    }
+
+    /// A finished sentence for `writeFailed`/`readFailed`: `message`, or a
+    /// plainer one for a full disk, plus the error's domain and code for a
+    /// report. Never the error's own text (5.1.0, U5).
+    static func failure(_ message: String, _ error: Error) -> String {
+        if let cocoa = error as? CocoaError, cocoa.code == .fileWriteOutOfSpace {
+            return String(localized: "There isn't enough free storage on this iPhone.")
+        }
+        guard type(of: error) is NSError.Type else { return message }
+        let ns = error as NSError
+        return "\(message) (\(ns.domain) \(ns.code))"
     }
 
     private static func protect(_ url: URL) throws {
@@ -259,7 +271,7 @@ public enum SharedContainer {
                 try? protect(dest)
             } catch {
                 try? FileManager.default.removeItem(at: destDir)
-                throw SharedContainerError.readFailed(error.localizedDescription)
+                throw SharedContainerError.readFailed(failure(String(localized: "Couldn't move the shared file into AgePony."), error))
             }
             return ClaimedShare(id: payload.token, direction: payload.direction, kind: .file,
                                 text: nil, fileURL: dest)

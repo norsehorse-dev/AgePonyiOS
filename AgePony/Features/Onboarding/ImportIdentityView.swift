@@ -25,7 +25,7 @@ struct ImportIdentityView: View {
     let onDone: () -> Void
 
     @State private var mode: Mode = .age
-    @State private var name: String = "Personal"
+    @State private var name: String = String(localized: "Personal")
     @State private var pastedAge: String = ""
     @State private var pastedSSH: String = ""
     @State private var pastedYubiKey: String = ""
@@ -55,12 +55,13 @@ struct ImportIdentityView: View {
             }
 
             Section {
-                Picker("Source", selection: $mode) {
+                // A menu, not segments: the labels grow in translation (rule 10).
+                Picker("Key type", selection: $mode) {
                     Text("age identity").tag(Mode.age)
                     Text("SSH key").tag(Mode.ssh)
                     Text("YubiKey").tag(Mode.yubikey)
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
             }
 
             switch mode {
@@ -77,7 +78,7 @@ struct ImportIdentityView: View {
                     if saving {
                         ProgressView().frame(maxWidth: .infinity)
                     } else {
-                        Text("Save & continue").frame(maxWidth: .infinity)
+                        Text("Save and continue").frame(maxWidth: .infinity)
                     }
                 }
                 .buttonStyle(.agePonyPrimary)
@@ -85,7 +86,14 @@ struct ImportIdentityView: View {
                 .listRowBackground(Color.clear)
                 .disabled(saveDisabled)
             }
+
+            if let importError {
+                Section {
+                    StatusText(importError)
+                }
+            }
         }
+        .textCase(nil)
         .navigationTitle("Import identity")
         .navigationBarTitleDisplayMode(.inline)
         .fileImporter(
@@ -95,14 +103,6 @@ struct ImportIdentityView: View {
         ) { result in
             handleFilePick(result)
         }
-        .alert("Could not import", isPresented: Binding(
-            get: { importError != nil },
-            set: { if !$0 { importError = nil } }
-        ), actions: {
-            Button("OK", role: .cancel) { importError = nil }
-        }, message: {
-            Text(importError ?? "")
-        })
     }
 
     // MARK: - age section
@@ -151,9 +151,7 @@ struct ImportIdentityView: View {
                     showFilePicker = true
                 } label: {
                     Label("Pick from Files…", systemImage: "doc.badge.plus")
-                        .font(AgePonyTypography.footnote)
                 }
-                .foregroundStyle(AgePonyColors.tealCore)
             } header: {
                 Text("Paste or pick OpenSSH private key")
             } footer: {
@@ -165,9 +163,8 @@ struct ImportIdentityView: View {
                     SecureField("Passphrase", text: $passphrase)
                         .textInputAutocapitalization(.never)
                     if let msg = passphraseError {
-                        Text(msg)
-                            .font(AgePonyTypography.caption)
-                            .foregroundStyle(AgePonyColors.destructive)
+                        StatusText(msg)
+                            .font(AgePonyTypography.footnote)
                     }
                 } header: {
                     Text("Key is encrypted")
@@ -200,10 +197,10 @@ struct ImportIdentityView: View {
             if let text = String(data: data, encoding: .utf8) {
                 pastedSSH = text
             } else {
-                importError = "That file isn't a UTF-8 OpenSSH key."
+                importError = String(localized: "That file isn't a text OpenSSH key.")
             }
         } catch {
-            importError = error.localizedDescription
+            importError = UserMessage.text(for: error, fallback: String(localized: "Couldn't read the key file you picked."))
         }
     }
 
@@ -211,6 +208,7 @@ struct ImportIdentityView: View {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         saving = true
+        importError = nil
         passphraseError = nil
         if mode == .yubikey {
             Task { await saveYubiKey(trimmed) }
@@ -263,7 +261,7 @@ struct ImportIdentityView: View {
                     return
                 } catch SSHImportError.wrongPassphrase {
                     showPassphraseField = true
-                    passphraseError = "Incorrect passphrase. Try again."
+                    passphraseError = String(localized: "Incorrect passphrase. Try again.")
                     saving = false
                     return
                 }
@@ -277,20 +275,26 @@ struct ImportIdentityView: View {
     }
 
     /// Store a YubiKey identity: the stub, and the public key from the pasted
-    /// file or from one NFC tap.
+    /// file or from one NFC tap. The PIN policy (5.1.0 item 1) comes from the file's
+    /// `PIN policy:` comment; when the import taps, GET METADATA in the same tap
+    /// gives it from the key itself, which wins when the key answers.
     @MainActor
     private func saveYubiKey(_ trimmed: String) async {
         defer { saving = false }
         do {
-            let (stub, known) = try YubiKeyStub.parseIdentityFile(pastedYubiKey)
+            let parsed = try YubiKeyStub.parseIdentityFile(pastedYubiKey)
+            let stub = parsed.stub
+            var pinPolicy = parsed.pinPolicy
             let key: Data
-            if let known {
+            if let known = parsed.publicKey {
                 key = known
             } else {
-                key = try await YubiKeyDecrypt.readKey(stub: stub)
+                let read = try await YubiKeyDecrypt.readKey(stub: stub)
+                key = read.key
+                if read.pinPolicy != .unknown { pinPolicy = read.pinPolicy }
             }
             if vault.identities.contains(where: { $0.type == .yubikey && $0.publicKeyMaterial == key }) {
-                importError = "This YubiKey key is already in your vault."
+                importError = String(localized: "This YubiKey key is already in your vault.")
                 return
             }
             let stored = StoredIdentity(
@@ -298,7 +302,8 @@ struct ImportIdentityView: View {
                 type: .yubikey,
                 publicKeyMaterial: key,
                 privateKeyMaterial: stub.bytes,
-                sshComment: nil
+                sshComment: nil,
+                pinPolicy: pinPolicy
             )
             _ = try vault.addIdentity(stored)
             onDone()
@@ -324,15 +329,15 @@ struct ImportIdentityView: View {
     private func describe(hrp: String) -> String {
         switch hrp.lowercased() {
         case "age-secret-key-":
-            return "a classic age identity, starting AGE-SECRET-KEY-1"
+            return String(localized: "a classic age identity, starting AGE-SECRET-KEY-1")
         case "age-secret-key-pq-":
-            return "a post-quantum identity, starting AGE-SECRET-KEY-PQ-1"
+            return String(localized: "a post-quantum identity, starting AGE-SECRET-KEY-PQ-1")
         case "age":
-            return "an age recipient (age1…), which is a public key rather than an identity"
+            return String(localized: "an age recipient (age1…), which is a public key rather than an identity")
         case "age1pq":
-            return "a post-quantum recipient (age1pq1…), which is a public key rather than an identity"
+            return String(localized: "a post-quantum recipient (age1pq1…), which is a public key rather than an identity")
         default:
-            return "a “\(hrp)…” string"
+            return String(localized: "a “\(hrp)…” string")
         }
     }
 
@@ -340,29 +345,29 @@ struct ImportIdentityView: View {
         if let e = error as? Bech32Error {
             switch e {
             case .unexpectedHRP(let expected, let actual):
-                return "That's \(describe(hrp: actual)). This field needs \(describe(hrp: expected))."
+                return String(localized: "That's \(describe(hrp: actual)). This field needs \(describe(hrp: expected)).")
             case .invalidChecksum:
-                return "The checksum doesn't match. The string is probably truncated or has a typo — check you copied all of it."
+                return String(localized: "The checksum doesn't match. The string is probably truncated or has a typo, so check you copied all of it.")
             case .mixedCase:
-                return "An age key is all one case. This string mixes upper and lower case."
+                return String(localized: "An age key is all one case. This string mixes upper and lower case.")
             case .invalidCharacter(let c):
-                return "“\(c)” can't appear in an age key. Check for a stray character picked up while copying."
+                return String(localized: "“\(String(c))” can't appear in an age key. Check for a stray character picked up while copying.")
             case .invalidPadding:
-                return "That decoded cleanly but is the wrong length for its key type."
+                return String(localized: "That decoded cleanly but is the wrong length for its key type.")
             case .stringTooShort, .missingSeparator, .emptyHRP:
-                return "That doesn't look like an age identity string."
-            default:
-                return "That doesn't look like a valid age identity string. (\(e))"
+                return String(localized: "That doesn't look like an age identity string.")
+            case .stringTooLong, .hrpOutOfRange, .invalidBitGroup:
+                return String(localized: "That doesn't look like a valid age identity string.")
             }
         }
         if let e = error as? SSHImportError {
             switch e {
-            case .passphraseRequired: return "This key is passphrase-protected."
-            case .wrongPassphrase:    return "Incorrect passphrase."
-            case .unsupportedKeyType: return "Only ed25519 and RSA SSH keys are supported."
-            case .malformedPEM:       return "The PEM appears malformed."
+            case .passphraseRequired: return String(localized: "This key is protected with a passphrase. Enter it below.")
+            case .wrongPassphrase:    return String(localized: "Wrong passphrase for this SSH key.")
+            case .unsupportedKeyType: return String(localized: "AgePony can import SSH Ed25519 and RSA keys. This is another type.")
+            case .malformedPEM:       return String(localized: "That isn't a readable OpenSSH private key.")
             }
         }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't import that key."))
     }
 }

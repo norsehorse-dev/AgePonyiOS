@@ -33,10 +33,10 @@ public enum MigrateError: Error, Equatable {
 extension MigrateError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .noRecipients: return "Choose at least one recipient."
-        case .sameRecipients: return "The file is already encrypted to those recipients."
+        case .noRecipients: return String(localized: "Choose at least one recipient.")
+        case .sameRecipients: return String(localized: "The file is already encrypted to those recipients.")
         case .signatureWouldBeLost:
-            return "This file is signed, and its signature covers who it was encrypted to, so re-encrypting it would drop the signature. Decrypt it and encrypt it again (signing it yourself if you like) instead."
+            return String(localized: "This file is signed, and its signature covers who it was encrypted to, so re-encrypting it would drop the signature. Decrypt it and encrypt it again (signing it yourself if you like) instead.")
         }
     }
 }

@@ -56,13 +56,13 @@ public enum SecureEnclaveSigner {
                 kCFAllocatorDefault, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                 [.privateKeyUsage, .userPresence], nil
             ) else {
-                throw SecureEnclaveSignerError.generationFailed("access control")
+                throw SecureEnclaveSignerError.generationFailed(String(localized: "iOS couldn't set up the protection for the Secure Enclave key."))
             }
             let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
             let wire = SSHSig.ecdsaP256PublicKeyWire(x963Q: key.publicKey.x963Representation)
             return (key.dataRepresentation, wire)
         } catch {
-            throw SecureEnclaveSignerError.generationFailed(String(describing: error))
+            throw SecureEnclaveSignerError.generationFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't create a Secure Enclave key.")))
         }
     }
 
@@ -114,7 +114,7 @@ public enum SecureEnclaveSigner {
                 hash: hash
             )
         } catch {
-            throw SecureEnclaveSignerError.signFailed(String(describing: error))
+            throw SecureEnclaveSignerError.signFailed(UserMessage.text(for: error, fallback: String(localized: "The Secure Enclave couldn't make the signature.")))
         }
     }
 }

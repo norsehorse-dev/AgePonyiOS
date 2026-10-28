@@ -2,10 +2,10 @@
 //  Piv.swift
 //  AgePonyCore
 //
-//  The slice of the PIV card interface (NIST SP 800-73-4, plus YubiKey's GET SERIAL)
-//  that decrypting with an age-plugin-yubikey key needs: select the applet, read a
-//  slot's certificate for its public key, verify the PIN, and have the card do a P-256
-//  ECDH.
+//  The slice of the PIV card interface (NIST SP 800-73-4, plus YubiKey's GET SERIAL and
+//  GET METADATA) that decrypting with an age-plugin-yubikey key needs: select the
+//  applet, read a slot's certificate for its public key and its PIN policy, verify the
+//  PIN, and have the card do a P-256 ECDH.
 //
 //  Transport-free: this builds APDUs and parses responses, and `PivCard` is whatever
 //  carries them (CoreNFC `NFCISO7816Tag` in the app). Response chaining (SW 61xx) is
@@ -109,6 +109,23 @@ public enum Piv {
         }
         guard secret.count == 32 else { throw PivError.malformedResponse("unexpected shared secret size \(secret.count)") }
         return secret
+    }
+
+    /// YubiKey GET METADATA (INS F7, firmware 5.3+) for `slot`: the PIN policy of the key
+    /// in it. Older firmware answers 6D00, which gives `.unknown`, as does any other
+    /// refusal or an answer without a policy. Only the transport can throw.
+    public static func pinPolicy(_ card: PivCard, slot: UInt8) throws -> YubiKeyPINPolicy {
+        let (resp, sw) = try transceive(card, apdu(ins: 0xF7, p1: 0x00, p2: slot, data: Data(), le: true))
+        return pinPolicy(metadata: resp, sw: sw)
+    }
+
+    /// The PIN policy in a GET METADATA answer: tag 02, byte 0. Anything but 9000 with a
+    /// well-formed policy tag is `.unknown`.
+    public static func pinPolicy(metadata: Data, sw: UInt16) -> YubiKeyPINPolicy {
+        guard sw == swOK,
+              let policy = try? Tlv.find(metadata, tag: 0x02),
+              let byte = policy.first else { return .unknown }
+        return YubiKeyPINPolicy(metadataByte: byte)
     }
 
     /// Object id of a retired key-management slot's certificate: 82 -> 5FC10D ... 95 -> 5FC120.

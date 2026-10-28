@@ -4,7 +4,7 @@
 //
 //  Text-tab landing. Mirrors FilesView shape, but in-memory: paste a text
 //  blob → encrypt → get armored output to paste anywhere. Reverse for
-//  decrypt. No file picker, no share sheet — copy-to-clipboard is the
+//  decrypt. No file picker, no share sheet; copy-to-clipboard is the
 //  primary output affordance.
 //
 //  Useful for chat / email / forum posts where the recipient receives
@@ -21,41 +21,15 @@ struct TextModeView: View {
     @State private var showDecrypt: Bool = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "textformat.alt")
-                .font(.system(size: 64, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-
-            Text("Text")
-                .font(AgePonyTypography.largeTitle)
-
-            Text("Encrypt or decrypt a block of text. Useful for pasting into chat, email, or anywhere binary attachments are awkward.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
-
-            Spacer()
-
-            VStack(spacing: 14) {
-                Button {
-                    showEncrypt = true
-                } label: {
-                    Label("Encrypt text", systemImage: "lock.fill")
-                }
-                .buttonStyle(.agePonyPrimary)
-
-                Button {
-                    showDecrypt = true
-                } label: {
-                    Label("Decrypt text", systemImage: "lock.open.fill")
-                }
-                .buttonStyle(.agePonySecondary)
+        List {
+            Section {
+                row("Encrypt text", systemImage: "lock") { showEncrypt = true }
+                row("Decrypt text", systemImage: "lock.open") { showDecrypt = true }
+            } footer: {
+                Text("Encrypted text is armored, so you can paste it into a chat, an email or anywhere an attachment is awkward.")
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 32)
         }
+        .textCase(nil)
         .sheet(isPresented: $showEncrypt) {
             NavigationStack {
                 TextEncryptView(vault: vault)
@@ -66,5 +40,13 @@ struct TextModeView: View {
                 TextDecryptView(vault: vault)
             }
         }
+    }
+
+    /// One action. Opens its screen as a sheet, so there's no chevron.
+    private func row(_ title: LocalizedStringKey, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+        }
+        .foregroundStyle(.primary)
     }
 }

@@ -2,8 +2,8 @@
 //  MigrateFlow.swift
 //  AgePony
 //
-//  Move a file you already hold onto different recipients — in practice, onto a
-//  post-quantum one.
+//  Move a file you already hold onto different recipients. In practice that's
+//  onto a post-quantum one.
 //
 //  Why this exists: encrypting to a post-quantum recipient protects files from
 //  today onward, but everything already encrypted stays exactly as breakable as
@@ -35,10 +35,14 @@ struct MigrateFlow: View {
     @State private var progressFraction: Double?
     @State private var result: MigrateService.Output?
     @State private var errorMessage: String?
-    /// YubiKey PIV PIN for this decrypt only, after the key asked for it.
-    @State private var yubiKeyPIN: String?
+    /// The YubiKey PIN prompt's answer, for the next `prepare` call only (5.1.0:
+    /// asked before the tap). Dropped as soon as `prepare` returns.
+    @State private var yubiKeyPIN: YubiKeyPINEntry?
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     @State private var showYubiKeyPIN = false
     @State private var yubiKeyPINNote: String?
+    @State private var yubiKeyOffersNoPIN = false
     @State private var showFilePicker: Bool = false
     @State private var showRecipientPicker: Bool = false
 
@@ -54,11 +58,18 @@ struct MigrateFlow: View {
 
     var body: some View {
         content
+            .ownerCheck(ownerCheck, vault: vault)
             .navigationTitle("Re-encrypt a file")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { cleanupAndDismiss() }
+                if stage == .done {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { cleanupAndDismiss() }
+                    }
+                } else {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { cleanupAndDismiss() }
+                    }
                 }
             }
             .fileImporter(
@@ -77,23 +88,15 @@ struct MigrateFlow: View {
                             // whole operation is about moving to a stronger
                             // key, not to a memorised one.
                             recipients = picked
-                            recipientLabel = "\(picked.count) recipient\(picked.count == 1 ? "" : "s")"
+                            recipientLabel = String(AttributedString(localized: "^[\(picked.count) recipient](inflect: true)").characters)
                         },
                         onSaveRecipient: { try vault.addRecipient($0) }
                     )
                 }
             }
-            .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote) { pin in
+            .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote, offersNoPIN: yubiKeyOffersNoPIN) { pin in
                 yubiKeyPIN = pin
                 Task { await runMigrate(afterPIN: true) }
-            }
-            .alert(
-                "Re-encrypt failed",
-                isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-            ) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
             }
     }
 
@@ -109,37 +112,34 @@ struct MigrateFlow: View {
     }
 
     private var pickFileStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Re-encrypt a file")
-                .font(AgePonyTypography.title)
-            Text("Decrypt a file you can already open and encrypt it again to different recipients — usually to move it onto a post-quantum key, so a file stored today stays private later.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
-            Button("Pick a .age file…") { showFilePicker = true }
-                .buttonStyle(.agePonyPrimary)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
+        Form {
+            Section {
+                Button("Choose a .age file…") { showFilePicker = true }
+            } footer: {
+                Text("Decrypt a file you can already open and encrypt it again to different recipients. Usually that's to move it onto a quantum-safe key, so a file stored today stays private later.")
+            }
+            errorSection
+        }
+        .textCase(nil)
+    }
+
+    /// The last failure, under the action that caused it.
+    @ViewBuilder
+    private var errorSection: some View {
+        if let errorMessage {
+            Section {
+                StatusText(errorMessage)
+            }
         }
     }
 
     private var configureStage: some View {
         Form {
             if let summary {
-                Section("Current file") {
-                    FileInfoCard(filename: sourceName, summary: summary)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                    if summary.isPostQuantum {
-                        Text("This file is already encrypted to a post-quantum recipient.")
-                            .font(AgePonyTypography.caption)
-                            .foregroundStyle(.secondary)
+                FileInfoSection(filename: sourceName, summary: summary)
+                if summary.isPostQuantum {
+                    Section {
+                        Label("This file is already encrypted to a quantum-safe recipient.", systemImage: "atom")
                     }
                 }
 
@@ -147,6 +147,7 @@ struct MigrateFlow: View {
                     Section("Passphrase") {
                         SecureField("Passphrase for the current file", text: $passphrase)
                             .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
                     }
                 }
             }
@@ -156,8 +157,13 @@ struct MigrateFlow: View {
                     showRecipientPicker = true
                 } label: {
                     HStack {
-                        Text(recipients.isEmpty ? "Choose new recipients" : recipientLabel)
-                            .foregroundStyle(recipients.isEmpty ? AgePonyColors.tealCore : .primary)
+                        if recipients.isEmpty {
+                            Text("Choose new recipients")
+                                .foregroundStyle(AgePonyColors.accent)
+                        } else {
+                            Text(recipientLabel)
+                                .foregroundStyle(.primary)
+                        }
                         Spacer()
                         Image(systemName: "chevron.right").foregroundStyle(.secondary)
                     }
@@ -173,82 +179,86 @@ struct MigrateFlow: View {
                 Button {
                     Task { await runMigrate() }
                 } label: {
-                    Text("Re-encrypt").frame(maxWidth: .infinity)
+                    Text("Re-encrypt")
                 }
+                .buttonStyle(.agePonyPrimary)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
                 .disabled(!canRun)
             } footer: {
                 Text("While this runs, a decrypted copy is written to this app's temporary storage and deleted as soon as it finishes.")
             }
+
+            errorSection
         }
+        .textCase(nil)
     }
 
     private var workingStage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Spacer()
             if let progressFraction {
                 ProgressView(value: progressFraction)
                     .progressViewStyle(.linear)
-                    .tint(AgePonyColors.tealCore)
                     .padding(.horizontal, 48)
-                Text("\(Int(progressFraction * 100))%")
-                    .font(AgePonyTypography.monoCaption)
+                Text(progressFraction, format: .percent.precision(.fractionLength(0)))
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             } else {
-                ProgressView().controlSize(.large).tint(AgePonyColors.tealCore)
+                ProgressView().controlSize(.large)
             }
-            Text(progressFraction ?? 0 < 0.5 ? "Decrypting…" : "Re-encrypting…")
-                .font(AgePonyTypography.headline)
-                .foregroundStyle(.secondary)
+            Group {
+                if (progressFraction ?? 0) < 0.5 {
+                    Text("Decrypting…")
+                } else {
+                    Text("Re-encrypting…")
+                }
+            }
+            .font(AgePonyTypography.headline)
+            .foregroundStyle(.secondary)
             Spacer()
         }
     }
 
     private var doneStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Re-encrypted")
-                .font(AgePonyTypography.title)
-            if let result {
-                Text(result.url.lastPathComponent)
-                    .font(AgePonyTypography.monoCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(ByteCountFormatter.string(fromByteCount: result.originalSize, countStyle: .file)
-                     + " → "
-                     + ByteCountFormatter.string(fromByteCount: result.newSize, countStyle: .file))
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text("Replace your stored copy with this one. The original file is unchanged.")
-                .font(AgePonyTypography.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
-            VStack(spacing: 12) {
+        Form {
+            Section {
+                StatusText("Re-encrypted", kind: .success, verdict: true)
+                    .font(AgePonyTypography.headline)
                 if let result {
+                    LabeledContent("File") {
+                        Text(result.url.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    LabeledContent("Size before", value: ByteCountFormatter.string(fromByteCount: result.originalSize, countStyle: .file))
+                    LabeledContent("Size now", value: ByteCountFormatter.string(fromByteCount: result.newSize, countStyle: .file))
+                    LabeledContent("Recipients", value: recipientLabel)
+                }
+            } footer: {
+                Text("Replace your stored copy with this one. The original file is unchanged.")
+            }
+
+            if let result {
+                Section {
                     ShareLink(item: result.url) {
                         Text("Share re-encrypted file").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.agePonyPrimary)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 }
-                Button("Done") { cleanupAndDismiss() }
-                    .buttonStyle(.agePonySecondary)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
         }
+        .textCase(nil)
     }
 
-    private func spinner(_ text: String) -> some View {
-        VStack(spacing: 18) {
+    private func spinner(_ text: LocalizedStringKey) -> some View {
+        VStack(spacing: 16) {
             Spacer()
-            ProgressView().controlSize(.large).tint(AgePonyColors.tealCore)
+            ProgressView().controlSize(.large)
             Text(text).font(AgePonyTypography.headline).foregroundStyle(.secondary)
             Spacer()
         }
@@ -270,12 +280,13 @@ struct MigrateFlow: View {
     private func handleFilePick(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
+            errorMessage = nil
             sourceURL = url
             sourceName = url.lastPathComponent
             stage = .inspecting
             Task { await inspect(url) }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't open the file you picked."))
         }
     }
 
@@ -284,32 +295,42 @@ struct MigrateFlow: View {
             summary = try AgeFileInspector.inspect(fileURL: url, knownIdentities: vault.identities)
             stage = .configure
         } catch {
-            errorMessage = String(describing: error)
+            if let e = error as? AgeFileInspectorError, case .notAnAgeFile = e {
+                errorMessage = String(localized: "This file isn't age-encrypted.")
+            } else {
+                errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't read the file's age header."))
+            }
             stage = .pickFile
         }
     }
 
     private func runMigrate(afterPIN: Bool = false) async {
+        // The PIN is used for this one attempt at most; no early return keeps it.
+        let pinEntry = yubiKeyPIN
+        yubiKeyPIN = nil
         guard let url = sourceURL, let summary else { return }
+        errorMessage = nil
 
         if !summary.onlyScrypt && !afterPIN {
             do {
-                try await BiometricGate.authenticate(reason: "Re-encrypt \"\(sourceName)\"")
+                try await ownerCheck.authenticate(vault, reason: String(localized: "Re-encrypt \"\(sourceName)\""))
             } catch BiometricGateError.userCancelled {
                 return
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = UserMessage.text(for: error, fallback: BiometricGate.didNotConfirmText)
                 return
             }
         }
 
         var identitiesSnapshot: [any AgeIdentity] = []
         if !summary.onlyScrypt {
-            switch await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: yubiKeyPIN) {
+            let prepared = await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: pinEntry)
+            switch prepared {
             case .ready(let ids):
                 identitiesSnapshot = ids
-            case .needsPIN(let note):
+            case .needsPIN(let note, let offersNoPIN):
                 yubiKeyPINNote = note
+                yubiKeyOffersNoPIN = offersNoPIN
                 showYubiKeyPIN = true
                 return
             case .cancelled:
@@ -319,7 +340,6 @@ struct MigrateFlow: View {
                 return
             }
         }
-        yubiKeyPIN = nil
 
         stage = .working
         progressFraction = nil
@@ -347,7 +367,9 @@ struct MigrateFlow: View {
                     progressFraction = nil
                 }
             } catch {
-                let description = (error as? MigrateError)?.errorDescription ?? String(describing: error)
+                let description: String? = UserMessage.isCancellation(error)
+                    ? nil
+                    : UserMessage.text(for: error, fallback: String(localized: "Couldn't re-encrypt the file."))
                 DispatchQueue.main.async {
                     errorMessage = description
                     stage = .configure

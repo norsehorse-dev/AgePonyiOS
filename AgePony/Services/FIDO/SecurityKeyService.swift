@@ -44,7 +44,7 @@ public enum SecurityKeyService {
     /// irrelevant to later signing (we ignore attestation), so it's random.
     public static func enroll(
         pin: String? = nil,
-        alertMessage: String = "Hold your security key to the top of your iPhone."
+        alertMessage: String = String(localized: "Hold your security key to the top of your iPhone.")
     ) async throws -> EnrollResult {
         let clientDataHash = Data((0 ..< 32).map { _ in UInt8.random(in: UInt8.min ... UInt8.max) })
 
@@ -94,7 +94,7 @@ public enum SecurityKeyService {
         namespace: String = SSHSig.defaultNamespace,
         hash: SSHSigHash = .sha512,
         pin: String? = nil,
-        alertMessage: String = "Hold your security key to sign."
+        alertMessage: String = String(localized: "Hold your security key to sign.")
     ) async throws -> String {
         try await signSSHSIG(
             messageHash: hash.digest(message),
@@ -124,7 +124,7 @@ public enum SecurityKeyService {
         namespace: String = SSHSig.defaultNamespace,
         hash: SSHSigHash = .sha512,
         pin: String? = nil,
-        alertMessage: String = "Hold your security key to sign."
+        alertMessage: String = String(localized: "Hold your security key to sign.")
     ) async throws -> String {
         try hash.validate(digest: messageHash)
         let signedData = SSHSig.signedData(messageHash: messageHash, namespace: namespace, hash: hash)

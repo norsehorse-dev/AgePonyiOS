@@ -32,7 +32,7 @@ struct RecentlyDeletedView: View {
         Group {
             if isEmpty {
                 ContentUnavailableView(
-                    "Nothing here",
+                    "Nothing recently deleted",
                     systemImage: "trash",
                     description: Text("Deleted identities and recipients wait here for \(Vault.trashRetentionDays) days before they're removed for good.")
                 )
@@ -70,6 +70,7 @@ struct RecentlyDeletedView: View {
                         Text("Restoring an identity brings its private key back intact. A permanent delete cannot be undone.")
                     }
                 }
+                .textCase(nil)
             }
         }
         .navigationTitle("Recently deleted")
@@ -81,7 +82,7 @@ struct RecentlyDeletedView: View {
             Text("This permanently removes everything here. Any deleted identity's private key is gone for good.")
         }
         .confirmationDialog(
-            pendingPurge.map { "Delete \"\($0.name)\" permanently?" } ?? "",
+            pendingPurge.map { String(localized: "Delete \"\($0.name)\" permanently?") } ?? "",
             isPresented: Binding(get: { pendingPurge != nil }, set: { if !$0 { pendingPurge = nil } }),
             titleVisibility: .visible,
             presenting: pendingPurge
@@ -111,17 +112,22 @@ private struct TrashRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            KeyAvatarView(seed: seed, name: name, size: 34)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(AgePonyTypography.bodyEmph)
+            KeyAvatarView(seed: seed, name: name, size: 36)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name).font(AgePonyTypography.body)
                 Text(deletedText)
-                    .font(AgePonyTypography.caption)
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            // Both actions visible in the row, each a full-height target
+            // (5.1.0, U4). Delete used to be swipe-only.
             Button("Restore", action: onRestore)
                 .buttonStyle(.borderless)
-                .font(AgePonyTypography.footnote)
+                .frame(minHeight: 44)
+            Button("Delete", role: .destructive, action: onPurge)
+                .buttonStyle(.borderless)
+                .frame(minHeight: 44)
         }
         .swipeActions(edge: .trailing) {
             Button(role: .destructive, action: onPurge) {
@@ -133,7 +139,9 @@ private struct TrashRow: View {
     private var deletedText: String {
         let days = Int(Date().timeIntervalSince(deletedAt) / 86_400)
         let remaining = max(0, Vault.trashRetentionDays - days)
-        let when = days <= 0 ? "today" : "\(days)d ago"
-        return "Deleted \(when) · \(remaining)d left"
+        if days <= 0 {
+            return String(AttributedString(localized: "Deleted today · ^[\(remaining) day](inflect: true) left").characters)
+        }
+        return String(AttributedString(localized: "Deleted ^[\(days) day](inflect: true) ago · ^[\(remaining) day](inflect: true) left").characters)
     }
 }

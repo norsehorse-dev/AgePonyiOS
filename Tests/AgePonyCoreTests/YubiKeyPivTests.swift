@@ -243,3 +243,113 @@ extension YubiKeyPivTests {
         XCTAssertThrowsError(try YubiKeyStub.parseIdentityFile("AGE-SECRET-KEY-1XYZ"))
     }
 }
+
+// MARK: - PIN policy (5.1.0 item 1)
+
+/// A YubiKey on firmware 5.3+: `FakePivCard` plus GET METADATA with a given PIN policy byte.
+final class MetadataPivCard: PivCard {
+    let inner: FakePivCard
+    let policyByte: UInt8
+    var metadataAPDUs: [Data] = []
+
+    init(_ inner: FakePivCard, policyByte: UInt8) {
+        self.inner = inner; self.policyByte = policyByte
+    }
+
+    func transmit(_ apdu: Data) throws -> Data {
+        let a = Array(apdu)
+        guard a[1] == 0xF7 else { return try inner.transmit(apdu) }
+        metadataAPDUs.append(apdu)
+        // Algorithm, policy (PIN, touch), origin, as a YubiKey answers for a P-256 slot.
+        return Tlv.encode(tag: 0x01, value: Data([0x11]))
+            + Tlv.encode(tag: 0x02, value: Data([policyByte, 0x01]))
+            + Tlv.encode(tag: 0x03, value: Data([0x01]))
+            + Data([0x90, 0x00])
+    }
+}
+
+extension YubiKeyPivTests {
+
+    func identityFile(pinPolicyLine: String?) -> String {
+        var lines = [
+            "#       Serial: 12345678, Slot: 1",
+            "#         Name: age identity TEST",
+        ]
+        if let pinPolicyLine { lines.append(pinPolicyLine) }
+        lines.append("# Touch policy: Always (A physical touch is required for every decryption)")
+        lines.append(stub.encode())
+        return lines.joined(separator: "\n")
+    }
+
+    func test_identityFile_pinPolicyComment() throws {
+        let never = try YubiKeyStub.parseIdentityFile(identityFile(pinPolicyLine: "#   PIN policy: Never  (A PIN is NOT required to decrypt)"))
+        XCTAssertEqual(never.pinPolicy, .notRequired)
+        XCTAssertEqual(never.stub, stub)
+
+        let once = try YubiKeyStub.parseIdentityFile(identityFile(pinPolicyLine: "#   PIN policy: Once   (A PIN is required once per session, if set)"))
+        XCTAssertEqual(once.pinPolicy, .required)
+
+        let always = try YubiKeyStub.parseIdentityFile(identityFile(pinPolicyLine: "#   PIN policy: Always (A PIN is required for every decryption, if set)"))
+        XCTAssertEqual(always.pinPolicy, .required)
+
+        // No PIN policy line (the touch policy line must not be read as one), and a bare stub.
+        XCTAssertEqual(try YubiKeyStub.parseIdentityFile(identityFile(pinPolicyLine: nil)).pinPolicy, .unknown)
+        XCTAssertEqual(try YubiKeyStub.parseIdentityFile(stub.encode()).pinPolicy, .unknown)
+
+        // A value this version doesn't know stays unknown, so the app still asks first.
+        XCTAssertEqual(try YubiKeyStub.parseIdentityFile(identityFile(pinPolicyLine: "#   PIN policy: Sometimes")).pinPolicy, .unknown)
+    }
+
+    func test_metadata_pinPolicyBytes() {
+        func answer(_ policy: UInt8) -> Data {
+            Tlv.encode(tag: 0x01, value: Data([0x11])) + Tlv.encode(tag: 0x02, value: Data([policy, 0x01]))
+        }
+        XCTAssertEqual(Piv.pinPolicy(metadata: answer(0), sw: 0x9000), .required)     // slot default
+        XCTAssertEqual(Piv.pinPolicy(metadata: answer(1), sw: 0x9000), .notRequired)  // never
+        XCTAssertEqual(Piv.pinPolicy(metadata: answer(2), sw: 0x9000), .required)     // once
+        XCTAssertEqual(Piv.pinPolicy(metadata: answer(3), sw: 0x9000), .required)     // always
+        XCTAssertEqual(Piv.pinPolicy(metadata: answer(0x7F), sw: 0x9000), .unknown)
+        // Firmware before 5.3 has no GET METADATA.
+        XCTAssertEqual(Piv.pinPolicy(metadata: Data(), sw: 0x6D00), .unknown)
+        // No policy tag, or a truncated one.
+        XCTAssertEqual(Piv.pinPolicy(metadata: Tlv.encode(tag: 0x01, value: Data([0x11])), sw: 0x9000), .unknown)
+        XCTAssertEqual(Piv.pinPolicy(metadata: Data([0x02, 0x05, 0x01]), sw: 0x9000), .unknown)
+    }
+
+    func test_metadata_onTheImportTap() throws {
+        // Old firmware (the fake card answers 6D00 to F7): key read, policy unknown.
+        let old = FakePivCard(key: key, certDER: certDER)
+        XCTAssertEqual(try Piv.pinPolicy(old, slot: 0x82), .unknown)
+        let oldRead = try PivSession.readKeyAndPINPolicy(old, stub: stub)
+        XCTAssertEqual(oldRead.key, compressedPub)
+        XCTAssertEqual(oldRead.pinPolicy, .unknown)
+
+        let expected: [(UInt8, YubiKeyPINPolicy)] = [(0, .required), (1, .notRequired), (2, .required), (3, .required)]
+        for (byte, policy) in expected {
+            let card = MetadataPivCard(FakePivCard(key: key, certDER: certDER), policyByte: byte)
+            let read = try PivSession.readKeyAndPINPolicy(card, stub: stub)
+            XCTAssertEqual(read.key, compressedPub)
+            XCTAssertEqual(read.pinPolicy, policy, "policy byte \(byte)")
+            // GET METADATA for the stub's slot: 00 F7 00 82 00. No PIN was sent.
+            XCTAssertEqual(card.metadataAPDUs, [Data([0x00, 0xF7, 0x00, 0x82, 0x00])])
+            XCTAssertFalse(card.inner.pinVerified)
+        }
+    }
+}
+
+extension YubiKeyPivTests {
+
+    /// A file with two identities: the PIN policy is the first identity's, the one
+    /// whose stub is read, not the last one in the file.
+    func test_identityFile_pinPolicyFromFirstStubOnly() throws {
+        let text = identityFile(pinPolicyLine: "#   PIN policy: Never  (A PIN is NOT required to decrypt)")
+            + "\n\n" + identityFile(pinPolicyLine: "#   PIN policy: Always (A PIN is required for every decryption, if set)")
+        let parsed = try YubiKeyStub.parseIdentityFile(text)
+        XCTAssertEqual(parsed.stub, stub)
+        XCTAssertEqual(parsed.pinPolicy, .notRequired)
+
+        let reversed = identityFile(pinPolicyLine: "#   PIN policy: Once   (A PIN is required once per session, if set)")
+            + "\n\n" + identityFile(pinPolicyLine: "#   PIN policy: Never  (A PIN is NOT required to decrypt)")
+        XCTAssertEqual(try YubiKeyStub.parseIdentityFile(reversed).pinPolicy, .required)
+    }
+}

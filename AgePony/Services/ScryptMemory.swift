@@ -110,17 +110,19 @@ public enum ScryptMemory {
             ByteCountFormatter.string(fromByteCount: $0, countStyle: .memory)
         }
 
-        var message = "A passphrase at 2^\(workFactor) needs \(needed) of memory"
-        if let availableText { message += ", and about \(availableText) is available" }
-        message += "."
-
-        if let smaller = largestFittingWorkFactor(), smaller < workFactor {
-            message += " Lower the work factor to 2^\(smaller) (\(memoryLabel(workFactor: smaller)))"
-            message += " in Settings, or close other apps and try again."
+        // Whole localized sentences (5.1.0, U5), joined with a space.
+        var sentences: [String] = []
+        if let availableText {
+            sentences.append(String(localized: "A passphrase at 2^\(workFactor) needs \(needed) of memory, and about \(availableText) is available."))
         } else {
-            message += " Close other apps and try again."
+            sentences.append(String(localized: "A passphrase at 2^\(workFactor) needs \(needed) of memory."))
         }
-        message += " This is the cost of the passphrase itself and does not depend on the file's size."
-        return message
+        if let smaller = largestFittingWorkFactor(), smaller < workFactor {
+            sentences.append(String(localized: "Lower the work factor to 2^\(smaller) (\(memoryLabel(workFactor: smaller))) in Settings, or close other apps and try again."))
+        } else {
+            sentences.append(String(localized: "Close other apps and try again."))
+        }
+        sentences.append(String(localized: "This is the cost of the passphrase itself and doesn't depend on the file's size."))
+        return sentences.joined(separator: " ")
     }
 }

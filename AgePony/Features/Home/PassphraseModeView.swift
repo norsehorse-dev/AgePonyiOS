@@ -24,10 +24,18 @@ struct PassphraseModeView: View {
     let onClose: () -> Void
 
     enum Job: String, CaseIterable, Identifiable {
-        case decryptText = "Decrypt text"
-        case encryptText = "Encrypt text"
-        case decryptFile = "Decrypt file"
+        case decryptText
+        case encryptText
+        case decryptFile
         var id: String { rawValue }
+
+        var label: LocalizedStringResource {
+            switch self {
+            case .decryptText: return "Decrypt text"
+            case .encryptText: return "Encrypt text"
+            case .decryptFile: return "Decrypt file"
+            }
+        }
     }
 
     @State private var task: Job = .decryptText
@@ -48,10 +56,11 @@ struct PassphraseModeView: View {
         NavigationStack {
             Form {
                 Section {
-                    Picker("Task", selection: $task) {
-                        ForEach(Job.allCases) { Text($0.rawValue).tag($0) }
+                    // A menu, not segments: the three labels grow in translation (rule 10).
+                    Picker("Action", selection: $task) {
+                        ForEach(Job.allCases) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                 } footer: {
                     Text("Your vault stays locked. Only passphrase-protected (scrypt) files and text work here; anything encrypted to a key needs you to unlock.")
                 }
@@ -88,8 +97,15 @@ struct PassphraseModeView: View {
                     .disabled(!canRun || working)
                 }
 
+                if let message {
+                    Section {
+                        StatusText(message)
+                    }
+                }
+
                 resultSection
             }
+            .textCase(nil)
             .navigationTitle("Without unlocking")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -103,12 +119,10 @@ struct PassphraseModeView: View {
                     fileURL = url
                 }
             }
-            .alert("Couldn't finish", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
-                Button("OK", role: .cancel) { message = nil }
-            } message: {
-                Text(message ?? "")
+            .onChange(of: task) { _, _ in
+                message = nil
+                resetResult()
             }
-            .onChange(of: task) { _, _ in resetResult() }
             .onAppear(perform: adoptShare)
             .onDisappear(perform: cleanUp)
         }
@@ -125,7 +139,11 @@ struct PassphraseModeView: View {
                 .textInputAutocapitalization(.never)
                 .onChange(of: input) { _, _ in output = nil }
         } header: {
-            Text(task == .decryptText ? "Encrypted text (-----BEGIN AGE ENCRYPTED FILE-----)" : "Text to encrypt")
+            if task == .decryptText {
+                Text("Encrypted text (-----BEGIN AGE ENCRYPTED FILE-----)")
+            } else {
+                Text("Text to encrypt")
+            }
         }
     }
 
@@ -137,7 +155,11 @@ struct PassphraseModeView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Button(fileURL == nil ? "Choose a .age file…" : "Choose another file…") { picking = true }
+            if fileURL == nil {
+                Button("Choose a .age file…") { picking = true }
+            } else {
+                Button("Choose another file…") { picking = true }
+            }
         } header: {
             Text("Passphrase-protected file")
         }
@@ -150,16 +172,26 @@ struct PassphraseModeView: View {
                 Text(output)
                     .font(task == .encryptText ? AgePonyTypography.monoCaption : AgePonyTypography.body)
                     .textSelection(.enabled)
-                Button(copied ? "Copied" : "Copy") {
+                Button {
                     ClipboardPreferences.copy(output)
                     copied = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
+                } label: {
+                    if copied {
+                        Text("Copied")
+                    } else {
+                        Text("Copy")
+                    }
                 }
                 if task == .encryptText {
                     ShareLink(item: output) { Text("Share encrypted text") }
                 }
             } header: {
-                Text(task == .encryptText ? "Encrypted" : "Decrypted")
+                if task == .encryptText {
+                    Text("Encrypted")
+                } else {
+                    Text("Decrypted")
+                }
             }
         }
         if let resultURL {
@@ -184,8 +216,8 @@ struct PassphraseModeView: View {
 
     private var actionTitle: String {
         switch task {
-        case .decryptText, .decryptFile: return "Decrypt"
-        case .encryptText: return "Encrypt"
+        case .decryptText, .decryptFile: return String(localized: "Decrypt")
+        case .encryptText: return String(localized: "Encrypt")
         }
     }
 
@@ -247,6 +279,7 @@ struct PassphraseModeView: View {
 
     private func run() {
         working = true
+        message = nil
         resetResult()
         let pass = passphrase
         switch task {
@@ -271,7 +304,7 @@ struct PassphraseModeView: View {
             DispatchQueue.global(qos: .userInitiated).async {
                 let result = Result { () throws -> String in
                     let plain = try Age.decrypt(ciphertext: binary, passphrase: pass)
-                    return String(data: plain, encoding: .utf8) ?? "(not text: \(plain.count) bytes)"
+                    return String(data: plain, encoding: .utf8) ?? String(localized: "(Not text, \(plain.count) bytes)")
                 }
                 DispatchQueue.main.async { finish(result) { output = $0 } }
             }
@@ -325,20 +358,28 @@ struct PassphraseModeView: View {
 
     private func describe(_ error: Error) -> String {
         if error is NeedsKey {
-            return "This was encrypted to a key, not a passphrase. Unlock AgePony to decrypt it with your keys."
+            return String(localized: "This was encrypted to a key, not a passphrase. Unlock AgePony to decrypt it with your keys.")
         }
         if let e = error as? TooHeavy {
-            return "Its passphrase work factor (\(ScryptMemory.describe(workFactor: e.factor))) needs more memory than iOS will give AgePony right now."
+            return String(localized: "Its passphrase work factor (\(ScryptMemory.describe(workFactor: e.factor))) needs more memory than iOS will give AgePony right now.")
         }
         if let e = error as? AgeFileInspectorError {
             switch e {
-            case .notAnAgeFile:   return "That isn't age-encrypted text or a .age file."
-            case .malformedArmor: return "The armored block is damaged."
-            default:              return "Couldn't read the age header."
+            case .notAnAgeFile:
+                if task == .decryptFile {
+                    return String(localized: "That file isn't age-encrypted.")
+                }
+                return String(localized: "That isn't age-encrypted text. It should start with -----BEGIN AGE ENCRYPTED FILE-----.")
+            case .malformedArmor:
+                return String(localized: "The armored block is damaged. Copy it again, including the BEGIN and END lines.")
+            case .headerParseFailed, .cannotOpenFile:
+                break
             }
         }
-        let text = String(describing: error)
-        if text.contains("wrongPassphrase") || text.contains("WrongPassphrase") { return "Wrong passphrase." }
-        return text
+        switch task {
+        case .decryptText: return UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the text."))
+        case .encryptText: return UserMessage.text(for: error, fallback: String(localized: "Couldn't encrypt the text."))
+        case .decryptFile: return UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the file."))
+        }
     }
 }

@@ -4,10 +4,11 @@
 //
 //  Top-level content for the Identities tab. Segmented control switches
 //  between the user's own identities (private keys they hold) and
-//  recipients (public keys others have given them).
+//  recipients (public keys others have given them). Two short labels, so a
+//  segmented control still fits in translation (5.1.0, U4); a third choice
+//  would move it to a menu.
 //
-//  In 1e the Recipients half is real — backed by RecipientListView and
-//  the new AddRecipientView. The "+" toolbar item branches by segment:
+//  The Recipients half is backed by RecipientListView and AddRecipientView. The "+" toolbar item branches by segment:
 //  on Identities it presents AddIdentityView, on Recipients it presents
 //  AddRecipientView.
 //
@@ -23,16 +24,23 @@ struct IdentitiesView: View {
     @State private var showingAddRecipient: Bool = false
 
     enum Segment: String, CaseIterable, Identifiable {
-        case identities = "My Identities"
-        case recipients = "Recipients"
+        case identities
+        case recipients
         var id: String { rawValue }
+
+        var label: LocalizedStringResource {
+            switch self {
+            case .identities: return "My identities"
+            case .recipients: return "Recipients"
+            }
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $segment) {
+            Picker("Show", selection: $segment) {
                 ForEach(Segment.allCases) { s in
-                    Text(s.rawValue).tag(s)
+                    Text(s.label).tag(s)
                 }
             }
             .pickerStyle(.segmented)
@@ -42,9 +50,9 @@ struct IdentitiesView: View {
 
             switch segment {
             case .identities:
-                IdentityListView(vault: vault)
+                IdentityListView(vault: vault, onAdd: { showingAddIdentity = true })
             case .recipients:
-                RecipientListView(vault: vault)
+                RecipientListView(vault: vault, onAdd: { showingAddRecipient = true })
             }
         }
         .toolbar {
@@ -55,7 +63,10 @@ struct IdentitiesView: View {
                     case .recipients: showingAddRecipient = true
                     }
                 } label: {
-                    Image(systemName: "plus")
+                    switch segment {
+                    case .identities: Label("Add identity", systemImage: "plus")
+                    case .recipients: Label("Add recipient", systemImage: "plus")
+                    }
                 }
             }
         }

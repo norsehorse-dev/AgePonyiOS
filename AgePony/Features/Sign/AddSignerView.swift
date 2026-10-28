@@ -48,17 +48,19 @@ struct AddSignerView: View {
             } header: {
                 Text("Name")
             } footer: {
-                Text("A label for this signer, like \"alice@example.com\". Shown when their signatures verify.")
+                Text("A label for this signer, such as their name or email address. Shown when their signatures verify.")
             }
 
             switch mode {
             case .paste:
                 Section {
                     TextField("ssh-ed25519 AAAA… comment", text: $pastedLine, axis: .vertical)
+                        .onChange(of: pastedLine) { errorMessage = nil }
                         .lineLimit(3...6)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(AgePonyTypography.monoCaption)
+                        // Mono for the key itself, not for the prompt.
+                        .font(pastedLine.isEmpty ? AgePonyTypography.body : AgePonyTypography.monoCaption)
                 } header: {
                     Text("Public key")
                 } footer: {
@@ -97,21 +99,20 @@ struct AddSignerView: View {
                 .listRowBackground(Color.clear)
                 .disabled(!canSave)
             }
+
+            if let errorMessage {
+                Section {
+                    StatusText(errorMessage)
+                }
+            }
         }
+        .textCase(nil)
         .navigationTitle("Add signer")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
             }
-        }
-        .alert(
-            "Couldn't add signer",
-            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
         }
     }
 
@@ -138,7 +139,7 @@ struct AddSignerView: View {
             comment = nil
         case .paste:
             guard let parsed = parsePublicKeyLine(pastedLine) else {
-                errorMessage = "That doesn't look like an SSH public key. Expected a line like \"ssh-ed25519 AAAA… comment\"."
+                errorMessage = String(localized: "That doesn't look like an SSH public key. Expected a line like \"ssh-ed25519 AAAA… comment\".")
                 return
             }
             keyType = parsed.keyType
@@ -158,7 +159,7 @@ struct AddSignerView: View {
             onAdded()
             dismiss()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't save the signer to the vault."))
         }
     }
 

@@ -14,6 +14,12 @@
 //  instead: the vault key is then wrapped under that secret only (No lock mode
 //  plus a password, M-3).
 //
+//  iOS refusing the lock with a passcode set (5.1.0): some iPhones refuse the
+//  Keychain item even with a passcode, with errSecAuthFailed (-25293) and no
+//  prompt. KeychainStore now tries weaker system protections first; if iOS
+//  refuses all of them, setup lands on the same screen as the no-passcode case,
+//  with the codes, instead of an alert with no way forward.
+//
 
 import SwiftUI
 
@@ -31,6 +37,7 @@ struct OnboardingView: View {
     enum Stage {
         case welcome
         case noPasscode
+        case keychainRefused(String)
         case lockSetup
         case choice
         case generate
@@ -44,6 +51,14 @@ struct OnboardingView: View {
                 WelcomeStage(onContinue: bootstrapAndContinue)
             case .noPasscode:
                 NoPasscodeStage(
+                    refusedDetail: nil,
+                    working: working,
+                    onCheckAgain: bootstrapAndContinue,
+                    onUsePassword: { showPasswordOnlySetup = true }
+                )
+            case .keychainRefused(let detail):
+                NoPasscodeStage(
+                    refusedDetail: detail,
                     working: working,
                     onCheckAgain: bootstrapAndContinue,
                     onUsePassword: { showPasswordOnlySetup = true }
@@ -72,7 +87,7 @@ struct OnboardingView: View {
                         try await vault.setAppPassword(secret, kind: kind)
                         stage = .choice
                     } catch {
-                        bootstrapError = error.localizedDescription
+                        bootstrapError = UserMessage.text(for: error, fallback: String(localized: "Couldn't set the password or PIN."))
                     }
                 }
             }
@@ -82,7 +97,7 @@ struct OnboardingView: View {
                 setUpPasswordOnly(secret: secret, kind: kind)
             }
         }
-        .alert("Couldn't initialize AgePony", isPresented: Binding(
+        .alert("Couldn't set up AgePony", isPresented: Binding(
             get: { bootstrapError != nil },
             set: { if !$0 { bootstrapError = nil } }
         ), actions: {
@@ -102,8 +117,12 @@ struct OnboardingView: View {
             do {
                 try await vault.bootstrap()
                 stage = .lockSetup
+            } catch let error as KeychainError {
+                // Nothing was written (bootstrap stores the key first), so the
+                // password route can start clean.
+                stage = .keychainRefused(UserMessage.text(for: error, fallback: String(localized: "iOS refused to store the vault key.")))
             } catch {
-                bootstrapError = error.localizedDescription
+                bootstrapError = UserMessage.text(for: error, fallback: String(localized: "Couldn't create the vault."))
             }
         }
     }
@@ -123,7 +142,7 @@ struct OnboardingView: View {
                 stage = .choice
             } catch {
                 try? vault.reset()
-                bootstrapError = error.localizedDescription
+                bootstrapError = UserMessage.text(for: error, fallback: String(localized: "Couldn't create the vault with a password or PIN."))
             }
         }
     }
@@ -133,114 +152,89 @@ struct OnboardingView: View {
         case .faceID:  return "Face ID"
         case .touchID: return "Touch ID"
         case .opticID: return "Optic ID"
-        case .none:    return "device passcode"
+        case .none:    return String(localized: "device passcode")
         }
     }
 }
 
 // MARK: - Welcome
 
+/// A plain first screen (5.1.0, U4): the app name as the title, one sentence
+/// on what the app does, and Continue. No hero icon, tagline or bullet list.
 private struct WelcomeStage: View {
     let onContinue: () -> Void
 
     var body: some View {
-        ZStack {
-            AgePonyColors.brandGradient.ignoresSafeArea()
-            VStack(spacing: 24) {
-                Spacer()
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 72, weight: .light))
-                    .foregroundStyle(.white)
-                Text("AgePony")
-                    .font(AgePonyTypography.largeTitle)
-                    .foregroundStyle(.white)
-                Text("Modern file encryption.")
-                    .font(AgePonyTypography.headline)
-                    .foregroundStyle(.white.opacity(0.9))
-                VStack(spacing: 12) {
-                    BulletRow(text: "Encrypt files and notes to people you trust.")
-                    BulletRow(text: "Identities and keys stored locally, biometrically gated.")
-                    BulletRow(text: "Zero accounts. Zero cloud. Zero telemetry.")
-                }
-                .padding(.horizontal, 24)
-                .padding(.top, 16)
-                Spacer()
-                Button("Get started", action: onContinue)
+        Form {
+            Section {
+                Text("AgePony encrypts files, text and notes with age, and your keys stay on this iPhone.")
+            }
+            Section {
+                Button("Continue", action: onContinue)
                     .buttonStyle(.agePonyPrimary)
-                    .padding(.horizontal, 32)
-                    .padding(.bottom, 40)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
             }
         }
-    }
-}
-
-private struct BulletRow: View {
-    let text: String
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: "checkmark")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-            Text(text)
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        .textCase(nil)
+        .navigationTitle("AgePony")
     }
 }
 
 // MARK: - No passcode (plan 2.8)
 
 private struct NoPasscodeStage: View {
+    /// nil: the iPhone has no passcode. Otherwise iOS refused the lock with a
+    /// passcode set, and this is its message with the codes (5.1.0).
+    let refusedDetail: String?
     let working: Bool
     let onCheckAgain: () -> Void
     let onUsePassword: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 12) {
-                Image(systemName: "lock.slash")
-                    .font(.system(size: 44, weight: .light))
-                    .foregroundStyle(AgePonyColors.tealCore)
-                Text("This iPhone has no passcode")
-                    .font(AgePonyTypography.title)
-                    .multilineTextAlignment(.center)
-                Text("AgePony normally locks your vault with Face ID, Touch ID or your passcode. iOS only allows that when the iPhone has a passcode, so that lock isn't available here.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                Text("Set a passcode in Settings › Face ID & Passcode and come back, or protect AgePony with its own password or PIN.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+        Form {
+            Section {
+                if let refusedDetail {
+                    Text("iOS wouldn't lock the vault here")
+                        .font(AgePonyTypography.headline)
+                    Text("AgePony normally locks your vault with Face ID, Touch ID or your passcode, but iOS refused to store the vault key that way on this iPhone. \(refusedDetail)")
+                    Text("You can protect AgePony with its own password or PIN instead, and try the Face ID lock again later in Settings.")
+                } else {
+                    Text("This iPhone has no passcode")
+                        .font(AgePonyTypography.headline)
+                    Text("AgePony normally locks your vault with Face ID, Touch ID or your passcode. iOS only allows that when the iPhone has a passcode, so that lock isn't available here.")
+                    Text("Set a passcode in the Settings app under Face ID & Passcode and come back, or protect AgePony with its own password or PIN.")
+                }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 24)
 
-            Spacer()
-
-            VStack(spacing: 14) {
+            Section {
                 Button("Use an AgePony password or PIN", action: onUsePassword)
                     .buttonStyle(.agePonyPrimary)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                     .disabled(working)
-
-                Button("I've set a passcode, check again", action: onCheckAgain)
-                    .buttonStyle(.agePonySecondary)
-                    .disabled(working)
-
-                if working {
-                    ProgressView()
+            } footer: {
+                if refusedDetail == nil {
+                    Text("Without a passcode, anyone holding the unlocked phone can open its apps. The AgePony password is then the only thing in front of your keys, so make it a strong one.")
                 }
-
-                Text("Without a passcode, anyone holding the unlocked phone can open its apps. The AgePony password is then the only thing in front of your keys, so make it a strong one.")
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 8)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
+
+            Section {
+                HStack {
+                    if refusedDetail == nil {
+                        Button("I've set a passcode, check again", action: onCheckAgain)
+                    } else {
+                        Button("Try again", action: onCheckAgain)
+                    }
+                    if working {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+                .disabled(working)
+            }
         }
+        .textCase(nil)
         .navigationTitle("Setup")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -258,8 +252,8 @@ private struct LockSetupStage: View {
             VStack(spacing: 8) {
                 Text("How AgePony unlocks")
                     .font(AgePonyTypography.title)
-                Text("Your vault is protected on this device. Choose how you unlock it — you can change this anytime in Settings, including adding a duress password.")
-                    .font(AgePonyTypography.footnote)
+                Text("Your vault is protected on this device. Choose how you unlock it. You can change this anytime in Settings, including adding a duress password.")
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
@@ -268,7 +262,7 @@ private struct LockSetupStage: View {
 
             Spacer()
 
-            VStack(spacing: 14) {
+            VStack(spacing: 12) {
                 Button("Continue with \(biometricWord)", action: onBiometric)
                     .buttonStyle(.agePonyPrimary)
 
@@ -276,7 +270,7 @@ private struct LockSetupStage: View {
                     .buttonStyle(.agePonySecondary)
 
                 Text("A password works with or without biometrics, and is required before you can set a duress password.")
-                    .font(AgePonyTypography.caption)
+                    .font(AgePonyTypography.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.top, 8)
@@ -296,36 +290,26 @@ private struct ChoiceStage: View {
     let onImport:   () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 8) {
-                Text("Add your first identity")
-                    .font(AgePonyTypography.title)
+        Form {
+            Section {
                 Text("AgePony needs at least one identity to decrypt files sent to you.")
-                    .font(AgePonyTypography.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
+            } header: {
+                Text("Add your first identity")
+                    .font(AgePonyTypography.headline)
             }
-            .padding(.top, 24)
-
-            Spacer()
-
-            VStack(spacing: 14) {
-                Button("Generate new identity", action: onGenerate)
+            Section {
+                Button("Generate a new identity", action: onGenerate)
                     .buttonStyle(.agePonyPrimary)
-
-                Button("Import existing identity", action: onImport)
-                    .buttonStyle(.agePonySecondary)
-
-                Text("You can add more identities later in the Identities tab.")
-                    .font(AgePonyTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 8)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
+            Section {
+                Button("Import an existing identity", action: onImport)
+            } footer: {
+                Text("You can add more identities later in the Identities tab.")
+            }
         }
+        .textCase(nil)
         .navigationTitle("Setup")
         .navigationBarTitleDisplayMode(.inline)
     }

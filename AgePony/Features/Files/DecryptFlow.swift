@@ -13,7 +13,7 @@
 //       with `preloadedURL` set, skipping the pickFile stage and going
 //       straight to inspect.
 //
-//  After inspection the user sees a FileInfoCard summarising what the
+//  After inspection the user sees a FileInfoSection summarising what the
 //  file is. They authorize the decrypt with the Decrypt button, which
 //  fires a biometric prompt (or asks for a passphrase, if the file is
 //  scrypt-only) and then surfaces a ShareLink to the plaintext result.
@@ -30,6 +30,8 @@ struct DecryptFlow: View {
     /// appear. Used for external `.age` opens via `.onOpenURL`.
     let preloadedURL: URL?
 
+    /// Outlives the view, so a decrypt that finishes after the flow is gone can tell (M-7).
+    @State private var lifetime = FlowLifetime()
     @State private var stage: Stage = .pickFile
     @State private var sourceURL: URL?
     @State private var sourceName: String = ""
@@ -39,10 +41,14 @@ struct DecryptFlow: View {
     /// Fraction of the input consumed, or nil before the first report.
     @State private var progressFraction: Double?
     @State private var errorMessage: String?
-    /// YubiKey PIV PIN for this decrypt only, after the key asked for it.
-    @State private var yubiKeyPIN: String?
+    /// The YubiKey PIN prompt's answer, for the next `prepare` call only (5.1.0:
+    /// asked before the tap). Dropped as soon as `prepare` returns.
+    @State private var yubiKeyPIN: YubiKeyPINEntry?
+    /// The in-app prompt, with the app password when Face ID only can't use Face ID (E6).
+    @State private var ownerCheck = OwnerCheck()
     @State private var showYubiKeyPIN = false
     @State private var yubiKeyPINNote: String?
+    @State private var yubiKeyOffersNoPIN = false
     @State private var resultURL: URL?
     /// The verdict on a signed bundle's signature, when the file carried one.
     @State private var signature: FileVerificationResult?
@@ -66,11 +72,18 @@ struct DecryptFlow: View {
 
     var body: some View {
         contentForStage
+            .ownerCheck(ownerCheck, vault: vault)
             .navigationTitle("Decrypt a file")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { cleanupAndDismiss() }
+                if stage == .done {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { cleanupAndDismiss() }
+                    }
+                } else {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { cleanupAndDismiss() }
+                    }
                 }
             }
             .task {
@@ -85,22 +98,15 @@ struct DecryptFlow: View {
             ) { result in
                 handleFilePick(result)
             }
-            .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote) { pin in
+            .yubiKeyPINPrompt(isPresented: $showYubiKeyPIN, note: yubiKeyPINNote, offersNoPIN: yubiKeyOffersNoPIN) { pin in
                 yubiKeyPIN = pin
                 Task { await runDecrypt(afterPIN: true) }
             }
             .onDisappear {
                 // However the flow goes away (swipe, lock, a new share), the
                 // plaintext it wrote goes with it (M-7).
+                lifetime.gone = true
                 if let url = resultURL { FileEncryptor.cleanupTempFile(at: url) }
-            }
-            .alert(
-                "Decrypt failed",
-                isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
-            ) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
             }
     }
 
@@ -123,32 +129,32 @@ struct DecryptFlow: View {
     }
 
     private var pickFileStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "lock.open")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Pick a .age file")
-                .font(AgePonyTypography.title)
-            Text("Decrypt with one of your stored identities, or with a passphrase for scrypt-encrypted files.")
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
-            Button("Pick from Files…") { showFilePicker = true }
-                .buttonStyle(.agePonyPrimary)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 40)
+        Form {
+            Section {
+                Button("Choose a .age file…") { showFilePicker = true }
+            } footer: {
+                Text("Decrypt with one of your identities, or with the passphrase for a file that was encrypted with one.")
+            }
+            errorSection
+        }
+        .textCase(nil)
+    }
+
+    /// The last failure, under the action that caused it.
+    @ViewBuilder
+    private var errorSection: some View {
+        if let errorMessage {
+            Section {
+                StatusText(errorMessage)
+            }
         }
     }
 
     private var inspectingStage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Spacer()
             ProgressView()
                 .controlSize(.large)
-                .tint(AgePonyColors.tealCore)
             Text("Reading file…")
                 .font(AgePonyTypography.headline)
                 .foregroundStyle(.secondary)
@@ -157,64 +163,58 @@ struct DecryptFlow: View {
     }
 
     private var readyStage: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if let summary {
-                    FileInfoCard(filename: sourceName, summary: summary)
-                }
+        Form {
+            if let summary {
+                FileInfoSection(filename: sourceName, summary: summary)
+            }
 
-                if summary?.onlyScrypt == true {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Passphrase required")
-                            .font(AgePonyTypography.headline)
-                        Text("This file was encrypted with a passphrase. Enter it to decrypt.")
-                            .font(AgePonyTypography.footnote)
-                            .foregroundStyle(.secondary)
-                        SecureField("Passphrase", text: $passphrase)
-                            .font(AgePonyTypography.body)
-                            .textInputAutocapitalization(.never)
-                            .padding(12)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color.secondary.opacity(0.08))
-                            )
-                    }
-                } else if let summary, !summary.onlyScrypt {
-                    Text("Tap **Decrypt** to authenticate with biometrics and reveal the plaintext.")
-                        .font(AgePonyTypography.footnote)
-                        .foregroundStyle(.secondary)
+            if summary?.onlyScrypt == true {
+                Section {
+                    SecureField("Passphrase", text: $passphrase)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Passphrase")
+                } footer: {
+                    Text("This file was encrypted with a passphrase.")
                 }
+            }
 
+            Section {
                 Button {
                     Task { await runDecrypt() }
                 } label: {
                     Text("Decrypt")
-                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.agePonyPrimary)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
                 .disabled(!canDecrypt)
+            } footer: {
+                if summary?.onlyScrypt == false {
+                    Text("AgePony asks for Face ID or your passcode before it uses your keys.")
+                }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
+
+            errorSection
         }
+        .textCase(nil)
     }
 
     private var decryptingStage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Spacer()
             if let progressFraction {
                 ProgressView(value: progressFraction)
                     .progressViewStyle(.linear)
-                    .tint(AgePonyColors.tealCore)
                     .padding(.horizontal, 48)
-                Text("\(Int(progressFraction * 100))%")
-                    .font(AgePonyTypography.monoCaption)
+                Text(progressFraction, format: .percent.precision(.fractionLength(0)))
+                    .font(AgePonyTypography.subheadline)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             } else {
                 ProgressView()
                     .controlSize(.large)
-                    .tint(AgePonyColors.tealCore)
             }
             Text("Decrypting…")
                 .font(AgePonyTypography.headline)
@@ -224,41 +224,43 @@ struct DecryptFlow: View {
     }
 
     private var doneStage: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(AgePonyColors.tealCore)
-            Text("Decrypted")
-                .font(AgePonyTypography.title)
-            if let url = resultURL {
-                Text(url.lastPathComponent)
-                    .font(AgePonyTypography.monoCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        Form {
+            Section {
+                StatusText("Decrypted", kind: .success, verdict: true)
+                    .font(AgePonyTypography.headline)
+                if let url = resultURL {
+                    LabeledContent("File") {
+                        Text(url.lastPathComponent)
+                            .font(AgePonyTypography.monoSmall)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            } footer: {
+                Text("The decrypted copy is deleted from this iPhone when you close this screen.")
             }
+
             // The signature is the last thing in a bundle, so its verdict can only
             // be known once the payload has already been written. A failed one has
-            // to be shown loudly here -- the file exists either way, and a user who
-            // sees only "Decrypted" would reasonably assume it was vouched for.
+            // to be shown here: the file exists either way, and a user who sees
+            // only "Decrypted" would reasonably assume it was vouched for.
             if let signature {
-                CompactVerifiedBadge(result: signature)
-                    .padding(.top, 6)
+                Section {
+                    CompactVerifiedBadge(result: signature)
+                } header: {
+                    Text("Signature")
+                }
             }
-            Spacer()
-            VStack(spacing: 12) {
-                if let url = resultURL {
+
+            if let url = resultURL {
+                Section {
                     PlaintextShareButton(url: url)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                 }
-                Button("Done") {
-                    cleanupAndDismiss()
-                }
-                .buttonStyle(.agePonySecondary)
             }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 40)
         }
+        .textCase(nil)
     }
 
     // MARK: - Logic
@@ -287,11 +289,12 @@ struct DecryptFlow: View {
             guard let url = urls.first else { return }
             handlePicked(url: url)
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserMessage.text(for: error, fallback: String(localized: "Couldn't open the file you picked."))
         }
     }
 
     private func handlePicked(url: URL) {
+        errorMessage = nil
         sourceURL = url
         sourceName = url.lastPathComponent
         // A verdict belongs to one file. Picking another must not leave the
@@ -321,7 +324,11 @@ struct DecryptFlow: View {
     }
 
     private func runDecrypt(afterPIN: Bool = false) async {
+        // The PIN is used for this one attempt at most; no early return keeps it.
+        let pinEntry = yubiKeyPIN
+        yubiKeyPIN = nil
         guard let summary, let url = sourceURL else { return }
+        errorMessage = nil
 
         // Authenticate first, on the main actor, before any heavy work begins.
         // The passphrase path needs no biometric: the passphrase is itself the
@@ -330,7 +337,7 @@ struct DecryptFlow: View {
         // depth, and a signal to the user that something is being unlocked.
         if !summary.onlyScrypt && !afterPIN {
             do {
-                try await BiometricGate.authenticate(reason: "Decrypt \"\(sourceName)\"")
+                try await ownerCheck.authenticate(vault, reason: String(localized: "Decrypt \"\(sourceName)\""))
             } catch BiometricGateError.userCancelled {
                 return
             } catch {
@@ -341,11 +348,13 @@ struct DecryptFlow: View {
 
         var identitiesSnapshot: [any AgeIdentity] = []
         if !summary.onlyScrypt {
-            switch await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: yubiKeyPIN) {
+            let prepared = await DecryptIdentities.prepare(vault: vault, stanzas: summary.rawStanzas, yubiKeyPIN: pinEntry)
+            switch prepared {
             case .ready(let ids):
                 identitiesSnapshot = ids
-            case .needsPIN(let note):
+            case .needsPIN(let note, let offersNoPIN):
                 yubiKeyPINNote = note
+                yubiKeyOffersNoPIN = offersNoPIN
                 showYubiKeyPIN = true
                 return
             case .cancelled:
@@ -355,7 +364,6 @@ struct DecryptFlow: View {
                 return
             }
         }
-        yubiKeyPIN = nil
 
         stage = .decrypting
         working = true
@@ -406,6 +414,12 @@ struct DecryptFlow: View {
                 )
 
                 DispatchQueue.main.async {
+                    // The flow went away while this decrypt ran (Cancel, swipe, lock):
+                    // nothing will show or clean up this file, so delete it now (M-7).
+                    if lifetime.gone {
+                        try? FileManager.default.removeItem(at: outcome.url)
+                        return
+                    }
                     resultURL = outcome.url
                     signature = verdict
                     stage = .done
@@ -430,39 +444,20 @@ struct DecryptFlow: View {
     }
 
     private func describeInspect(_ error: Error) -> String {
-        if let e = error as? AgeFileInspectorError {
-            switch e {
-            case .notAnAgeFile:          return "This file isn't an age-encrypted file."
-            case .malformedArmor:        return "The armored block is malformed."
-            case .headerParseFailed(let m): return "Couldn't parse the age header: \(m)"
-            case .cannotOpenFile(let name): return "Couldn't open \(name)."
-            }
+        if let e = error as? AgeFileInspectorError, case .notAnAgeFile = e {
+            return String(localized: "This file isn't age-encrypted.")
         }
-        return error.localizedDescription
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't read the file's age header."))
     }
 
-    private func describeDecrypt(_ error: Error) -> String {
-        if let e = error as? FileEncryptorError {
-            switch e {
-            case .ageError(let m):
-                if m.contains("wrongPassphrase") { return "Wrong passphrase." }
-                if m.contains("noMatchingIdentity") {
-                    return "No identity in this vault can decrypt this file."
-                }
-                return "Decrypt failed: \(m)"
-            case .readFailed(let m):  return "Couldn't read input: \(m)"
-            case .bundleDamaged(let m): return "This file decrypted, but the signed bundle inside it is damaged: \(m)"
-            case .writeFailed(let m): return "Couldn't write output: \(m)"
-            default:                  return String(describing: e)
-            }
-        }
-        if let e = error as? BiometricGateError {
-            switch e {
-            case .unavailable:       return "Biometric authentication is unavailable."
-            case .userCancelled:     return ""
-            case .failed(let m):     return m
-            }
-        }
-        return error.localizedDescription
+    /// Nil when the person cancelled, so nothing is shown.
+    private func describeDecrypt(_ error: Error) -> String? {
+        if UserMessage.isCancellation(error) { return nil }
+        return UserMessage.text(for: error, fallback: String(localized: "Couldn't decrypt the file."))
     }
+}
+
+/// Set when a flow goes away, read by work that may finish afterwards.
+final class FlowLifetime {
+    var gone = false
 }

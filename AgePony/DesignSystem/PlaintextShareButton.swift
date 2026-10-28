@@ -12,7 +12,7 @@ import UIKit
 
 struct PlaintextShareButton: View {
     let url: URL
-    var title: String = "Share decrypted file"
+    var title: LocalizedStringKey = "Share decrypted file"
 
     @State private var confirming = false
     @State private var sharing = false

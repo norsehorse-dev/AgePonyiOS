@@ -5,10 +5,9 @@
 //  Visual badge for a verification outcome, mirroring the verified-signer
 //  badge in PGPony. Three states:
 //
-//    • trusted        — valid + signed by a known identity/recipient (teal)
-//    • valid, unknown — cryptographically valid, key not in the vault (amber)
-//    • invalid        — bad signature / wrong namespace / not a signature
-//                       (the brand's "danger" magenta, kept off red on purpose)
+//    • trusted: valid and signed by one of your identities or trusted signers (green)
+//    • valid, unknown: cryptographically valid, key not in the vault (orange)
+//    • invalid: bad signature, wrong namespace, or not a signature (red)
 //
 
 import SwiftUI
@@ -17,37 +16,32 @@ struct VerifiedBadge: View {
 
     let result: FileVerificationResult
 
+    /// Rows for a Form section: the verdict (icon and word in the status
+    /// colour), what it means, then the signer's key (5.1.0, UI plan U4).
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: iconName)
-                .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(tint)
-
-            Text(title)
-                .font(AgePonyTypography.title)
-                .multilineTextAlignment(.center)
-
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                Text(title)
+                    .font(AgePonyTypography.headline)
+            } icon: {
+                Image(systemName: iconName)
+                    .foregroundStyle(tint)
+            }
             Text(subtitle)
-                .font(AgePonyTypography.footnote)
+                .font(AgePonyTypography.subheadline)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+        }
+        .padding(.vertical, 4)
 
-            if let detail = keyDetail {
-                VStack(spacing: 4) {
-                    if let kt = result.signerKeyType {
-                        Text(kt)
-                            .font(AgePonyTypography.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(detail)
-                        .font(AgePonyTypography.monoCaption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, 32)
-                }
-                .padding(.top, 4)
+        if keyDetail != nil, let kt = result.signerKeyType {
+            LabeledContent("Key type", value: kt)
+        }
+        if let detail = keyDetail {
+            LabeledContent("Fingerprint") {
+                Text(detail)
+                    .font(AgePonyTypography.monoSmall)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
         }
     }
@@ -61,14 +55,15 @@ struct VerifiedBadge: View {
     private var subtitle: String {
         switch result.trust {
         case .trusted(let name, let isOwn):
-            return isOwn
-                ? "Signed by your identity \"\(name)\". The file hasn't changed since it was signed."
-                : "Signed by \"\(name)\". The file hasn't changed since it was signed."
+            if isOwn {
+                return String(localized: "Signed by your identity \"\(name)\". The file hasn't changed since it was signed.")
+            }
+            return String(localized: "Signed by \"\(name)\". The file hasn't changed since it was signed.")
         case .validUnknownKey:
             if let name = result.untrustedSignerName {
-                return "The signature is valid and the key is your trusted signer \"\(name)\", but this signature doesn't meet that entry. \(result.untrustedReason ?? "")"
+                return String(localized: "The signature is valid and the key is your trusted signer \"\(name)\", but this signature doesn't meet that entry. \(result.untrustedReason ?? "")")
             }
-            return "The signature is mathematically valid, but the signing key isn't one of your identities or trusted signers. Add it as a trusted signer to recognize this signer next time."
+            return String(localized: "The signature is mathematically valid, but the signing key isn't one of your identities or trusted signers. Add it as a trusted signer to recognize this signer next time.")
         case .invalid(let reason):
             return reason
         }
@@ -100,17 +95,17 @@ extension SignatureTrust {
 
     var tint: Color {
         switch self {
-        case .trusted:         return AgePonyColors.tealCore
-        case .validUnknownKey: return .orange
+        case .trusted:         return AgePonyColors.success
+        case .validUnknownKey: return AgePonyColors.warning
         case .invalid:         return AgePonyColors.destructive
         }
     }
 
     var title: String {
         switch self {
-        case .trusted:         return "Verified"
-        case .validUnknownKey: return "Valid, unknown signer"
-        case .invalid:         return "Not verified"
+        case .trusted:         return String(localized: "Verified")
+        case .validUnknownKey: return String(localized: "Valid, unknown signer")
+        case .invalid:         return String(localized: "Not verified")
         }
     }
 
@@ -118,36 +113,40 @@ extension SignatureTrust {
     var summaryLine: String {
         switch self {
         case .trusted(let name, let isOwn):
-            return isOwn ? "Signed by you (\(name))" : "Signed by \(name)"
+            if isOwn {
+                return String(localized: "Signed by you (\(name))")
+            }
+            return String(localized: "Signed by \(name)")
         case .validUnknownKey:
-            return "Signed, but by a key you don't know"
+            return String(localized: "Signed, but by a key you don't know")
         case .invalid:
-            return "Signature didn't check out"
+            return String(localized: "Signature didn't check out")
         }
     }
 }
 
-/// A one-line signature verdict, for screens whose headline is something else.
+/// A one-row signature verdict, for screens whose headline is something else
+/// (the decrypted file). Goes inside a Form section.
 struct CompactVerifiedBadge: View {
 
     let result: FileVerificationResult
 
     var body: some View {
-        VStack(spacing: 4) {
-            Label(result.trust.summaryLine, systemImage: result.trust.iconName)
-                .font(AgePonyTypography.footnote)
-                .foregroundStyle(result.trust.tint)
-                .multilineTextAlignment(.center)
+        VStack(alignment: .leading, spacing: 4) {
+            Label {
+                Text(result.trust.summaryLine)
+            } icon: {
+                Image(systemName: result.trust.iconName)
+                    .foregroundStyle(result.trust.tint)
+            }
             if case .invalid(let reason) = result.trust {
                 Text(reason)
-                    .font(AgePonyTypography.caption)
+                    .font(AgePonyTypography.footnote)
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             } else if let name = result.untrustedSignerName {
                 Text("Your trusted signer \"\(name)\" doesn't vouch for this one. \(result.untrustedReason ?? "")")
-                    .font(AgePonyTypography.caption)
+                    .font(AgePonyTypography.footnote)
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             } else if let fingerprint = result.signerFingerprint {
                 Text(fingerprint)
                     .font(AgePonyTypography.monoCaption)
@@ -157,11 +156,10 @@ struct CompactVerifiedBadge: View {
             }
             if let note = result.note {
                 Text(note)
-                    .font(AgePonyTypography.caption)
+                    .font(AgePonyTypography.footnote)
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             }
         }
-        .padding(.horizontal, 32)
+        .padding(.vertical, 4)
     }
 }

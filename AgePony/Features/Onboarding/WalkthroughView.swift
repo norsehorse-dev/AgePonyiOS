@@ -8,19 +8,19 @@
 //  this is a swipeable feature tour that orients a new user around what
 //  each tab does. It is:
 //
-//    • Dynamic    — paged carousel the user swipes through (or taps Next).
-//    • Skippable  — a "Skip" affordance is always visible (testers asked
+//    • Dynamic:    paged carousel the user swipes through (or taps Next).
+//    • Skippable:  a "Skip" affordance is always visible (testers asked
 //                   for this explicitly).
-//    • Replayable — reachable any time from Settings → "Show walkthrough
+//    • Replayable: reachable any time from Settings, "Show walkthrough
 //                   again", so it isn't a one-shot.
 //
 //  Presentation: HomeView shows this as a full-screen cover on the first
 //  unlocked launch (gated by Vault.hasSeenWalkthrough), and SettingsView
 //  presents the same view on demand. Both call onFinish() to dismiss.
 //
-//  Styling mirrors OnboardingView.WelcomeStage — brand gradient hero,
-//  white type, primary button — so first-run feels like one coherent
-//  flow rather than two unrelated screens.
+//  Styling mirrors OnboardingView.WelcomeStage (plain system background,
+//  default text colors, one primary button), with system page dots and a
+//  toolbar Skip.
 //
 
 import SwiftUI
@@ -37,86 +37,69 @@ struct WalkthroughView: View {
         WalkthroughPage(
             symbol: "shield.lefthalf.filled",
             title: "Welcome to AgePony",
-            body: "Encrypt files, notes, and text for the people you trust — using the modern age encryption format. Here's a quick tour."
+            body: "Encrypt files, notes, and text for the people you trust, using the age encryption format. Here's a quick tour."
         ),
         WalkthroughPage(
             symbol: "doc.badge.gearshape",
             title: "Encrypt files",
-            body: "Pick any file in the Files tab, choose who can open it, and AgePony produces a .age file you can share anywhere — even over channels you don't control."
+            body: "Pick any file in the Files tab, choose who can open it, and AgePony makes a .age file you can share anywhere, even over channels you don't control."
         ),
         WalkthroughPage(
             symbol: "note.text",
-            title: "Notes & text",
+            title: "Notes and text",
             body: "Keep encrypted notes inside the app, or encrypt a snippet of text in the Text tab to paste into chat or email. Both stay sealed until the right person opens them."
         ),
         WalkthroughPage(
             symbol: "key",
-            title: "Identities & recipients",
-            body: "The Identities tab holds your keys. Add the public keys of people you send to as recipients — including age and SSH keys — so encrypting to them is one tap."
+            title: "Identities and recipients",
+            body: "The Identities tab holds your keys. Add the public keys of people you send to as recipients (age and SSH keys both work), so encrypting to them is one tap."
         ),
         WalkthroughPage(
             symbol: "lock.shield",
-            title: "Private by design",
-            body: "Everything stays on your device, gated behind Face ID or your passcode. No accounts, no cloud, no telemetry. You can replay this tour anytime from Settings."
+            title: "Your keys stay here",
+            body: "Everything stays on your device, behind Face ID or your passcode. There's no account, and nothing is sent to a server. You can replay this tour anytime from Settings."
         )
     ]
 
     private var isLastPage: Bool { index == pages.count - 1 }
 
     var body: some View {
-        ZStack {
-            AgePonyColors.brandGradient.ignoresSafeArea()
-
+        NavigationStack {
             VStack(spacing: 0) {
-                // Skip — always visible, per the testers' request.
-                HStack {
-                    Spacer()
-                    Button("Skip", action: onFinish)
-                        .font(AgePonyTypography.bodyEmph)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .padding(.horizontal, 20)
-                        .padding(.top, 12)
-                }
-
-                // Swipeable pages. We hide the system page dots and draw our
-                // own below so they don't collide with the action button.
+                // System page dots; the background keeps them visible on a
+                // light screen.
                 TabView(selection: $index) {
                     ForEach(pages.indices, id: \.self) { i in
                         WalkthroughPageView(page: pages[i])
                             .tag(i)
                     }
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                .tabViewStyle(.page(indexDisplayMode: .always))
+                .indexViewStyle(.page(backgroundDisplayMode: .always))
                 .animation(.easeInOut, value: index)
 
-                pageIndicator
-                    .padding(.bottom, 24)
-
-                Button(isLastPage ? "Get started" : "Next") {
+                Group {
                     if isLastPage {
-                        onFinish()
+                        Button("Continue", action: onFinish)
                     } else {
-                        withAnimation { index += 1 }
+                        Button("Next") {
+                            withAnimation { index += 1 }
+                        }
                     }
                 }
                 .buttonStyle(.agePonyPrimary)
                 .padding(.horizontal, 32)
+                .padding(.top, 16)
                 .padding(.bottom, 40)
             }
-        }
-    }
-
-    private var pageIndicator: some View {
-        HStack(spacing: 8) {
-            ForEach(pages.indices, id: \.self) { i in
-                Circle()
-                    .fill(i == index ? Color.white : Color.white.opacity(0.35))
-                    .frame(width: 8, height: 8)
-                    .animation(.easeInOut(duration: 0.2), value: index)
+            .background(Color(.systemBackground))
+            .toolbar {
+                // Skip is always visible, per the testers' request.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Skip", action: onFinish)
+                }
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Page \(index + 1) of \(pages.count)")
     }
 }
 
@@ -125,8 +108,8 @@ struct WalkthroughView: View {
 private struct WalkthroughPage: Identifiable {
     let id = UUID()
     let symbol: String
-    let title: String
-    let body: String
+    let title: LocalizedStringResource
+    let body: LocalizedStringResource
 }
 
 // MARK: - Single page
@@ -135,20 +118,16 @@ private struct WalkthroughPageView: View {
     let page: WalkthroughPage
 
     var body: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 24) {
             Spacer()
-            Image(systemName: page.symbol)
-                .font(.system(size: 68, weight: .light))
-                .foregroundStyle(.white)
-                .accessibilityHidden(true)
+            // No hero symbol (5.1.0, U4): the title and text carry the page.
             Text(page.title)
-                .font(AgePonyTypography.largeTitle)
-                .foregroundStyle(.white)
+                .font(AgePonyTypography.title)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Text(page.body)
                 .font(AgePonyTypography.body)
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             Spacer()
