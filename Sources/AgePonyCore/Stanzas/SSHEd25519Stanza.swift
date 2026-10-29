@@ -30,6 +30,10 @@ public enum SSHEd25519Error: Error, Equatable {
     case invalidEdPublicKey
     case invalidEdPrivateKey
     case conversionFailed
+    /// The key is a small-order point: every X25519 exchange with it gives an
+    /// all-zero secret, so a file encrypted to it could be opened by anyone
+    /// (5.1.1, M-1). age refuses these too.
+    case lowOrderPublicKey
 }
 
 /// Compute the 4-byte stanza tag for an SSH Ed25519 public key.
@@ -63,6 +67,17 @@ public struct SSHEd25519Recipient: AgeRecipient {
         self.edPublicKey = edPublicKey
         self.wireBlob = sshEd25519WireBlob(publicKey: edPublicKey)
         self.x25519Pub = try Ed25519Conversion.publicKeyToX25519(edPublicKey: edPublicKey)
+        // `isValidPublicKey` has no subgroup check, so a small-order Edwards point
+        // (y = p-1, or all zero bytes) gets here, and CryptoKit returns an all-zero
+        // secret for it instead of throwing. A clamped scalar is a multiple of 8,
+        // so one trial exchange with any scalar is zero exactly for these keys
+        // (5.1.1, M-1).
+        let probe = Curve25519.KeyAgreement.PrivateKey()
+        guard let peer = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: x25519Pub),
+              let trial = try? probe.sharedSecretFromKeyAgreement(with: peer),
+              !X25519Identity.isAllZero(trial) else {
+            throw SSHEd25519Error.lowOrderPublicKey
+        }
     }
 
     /// Convenience: parse from a one-line `ssh-ed25519 BASE64 [comment]` string.
@@ -80,6 +95,9 @@ public struct SSHEd25519Recipient: AgeRecipient {
 
         let theirPub = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: x25519Pub)
         let shared = try ephemeralPriv.sharedSecretFromKeyAgreement(with: theirPub)
+        // Refuse an all-zero secret, as age does (5.1.1, M-1). `init` already
+        // refuses these keys; this keeps wrap safe on its own.
+        guard !X25519Identity.isAllZero(shared) else { throw SSHEd25519Error.lowOrderPublicKey }
 
         // filippo age tweak: HKDF empty-IKM with wireBlob salt, then second X25519
         let label = Data("age-encryption.org/v1/ssh-ed25519".utf8)
@@ -94,6 +112,7 @@ public struct SSHEd25519Recipient: AgeRecipient {
         let sharedBytes = shared.withUnsafeBytes { Data($0) }
         let sharedAsPoint = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: sharedBytes)
         let tweakedShared = try tweakScalar.sharedSecretFromKeyAgreement(with: sharedAsPoint)
+        guard !X25519Identity.isAllZero(tweakedShared) else { throw SSHEd25519Error.lowOrderPublicKey }
 
         let salt = ephemeralPub + x25519Pub
         let wrapKey = tweakedShared.hkdfDerivedSymmetricKey(
@@ -174,6 +193,9 @@ public struct SSHEd25519Identity: AgeIdentity {
             ourPriv = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: x25519Priv)
             theirPub = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralPub)
             shared = try ourPriv.sharedSecretFromKeyAgreement(with: theirPub)
+            // A small-order ephemeral share gives an all-zero secret: not a
+            // stanza for us (5.1.1, M-1; age refuses it the same way).
+            guard !X25519Identity.isAllZero(shared) else { return nil }
             let tweakKey = HKDF<SHA256>.deriveKey(
                 inputKeyMaterial: SymmetricKey(data: Data()),
                 salt: wireBlob,
@@ -185,6 +207,7 @@ public struct SSHEd25519Identity: AgeIdentity {
             let sharedBytes = shared.withUnsafeBytes { Data($0) }
             let sharedAsPoint = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: sharedBytes)
             tweakedShared = try tweakScalar.sharedSecretFromKeyAgreement(with: sharedAsPoint)
+            guard !X25519Identity.isAllZero(tweakedShared) else { return nil }
         } catch {
             return nil
         }

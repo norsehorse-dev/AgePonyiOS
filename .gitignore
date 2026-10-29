@@ -13,6 +13,7 @@ fastlane/Preview.html
 fastlane/screenshots/
 fastlane/test_output/
 AgePony_Security_Audit_*.md
+AgePony_Security_Review_*.md
 
 # fastlane
 fastlane/raw_screenshots/

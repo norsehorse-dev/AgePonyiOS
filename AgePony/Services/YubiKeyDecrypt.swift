@@ -13,8 +13,10 @@
 //      from the identity's stored PIN policy (5.1.0 item 1).
 //
 //  The tap is only asked for when the file is addressed to a YubiKey in the vault
-//  (tag match first) and nothing else in the vault can open it, so a file with a
-//  software recipient as well never needs the key. NFC only, matching Android;
+//  (tag match first) and no software key in the vault can open it, so a file with
+//  a software recipient as well never needs the key. A Secure Enclave key doesn't
+//  count here (5.1.1, M-4): `DecryptIdentities.prepare` tries it first and asks
+//  for the tap only if it fails. NFC only, matching Android;
 //  USB-C and Lightning come later on both platforms.
 //
 //  The PIV logic itself (select, serial check, PIN, ECDH) is AgePonyCore's
@@ -37,16 +39,19 @@ enum YubiKeyDecrypt {
     }
 
     /// The YubiKey tap `stanzas` need, or nil when there's none to ask for: no
-    /// YubiKey in `identities` is addressed, or something else can open the file.
-    /// `others` are the identities that will be tried without a tap.
+    /// YubiKey in `identities` is addressed, or a software key can open the file.
+    /// `others` are the identities that will be tried without a tap; hardware ones
+    /// among them are left out of the decision (5.1.1, M-4), since a tag match
+    /// says nothing about whether the Enclave key still works.
     static func need(stanzas: [Stanza], identities: [StoredIdentity], others: [any AgeIdentity]) -> Need? {
+        let software = others.filter { !($0 is HardwareIdentity) }
         for stored in identities where stored.type == .yubikey {
             guard let stub = stored.yubiKeyStub,
                   let probe = try? YubiKeyIdentity.probe(stub: stub, publicKey: stored.publicKeyMaterial) else { continue }
             let points = probe.peerPoints(in: stanzas)
             guard !points.isEmpty else { continue }
-            // A software key, or a Secure Enclave key addressed by the file, opens it without a tap.
-            if (try? Age.anyOpens(stanzas: stanzas, identities: others)) == true { return nil }
+            // A software key opens it without a tap.
+            if (try? Age.anyOpens(stanzas: stanzas, identities: software)) == true { return nil }
             return Need(identity: stored, stub: stub, points: points)
         }
         return nil

@@ -14,6 +14,10 @@
 //  screen and the in-app prompts, so the context a decrypt hands to a Secure
 //  Enclave key never comes from the passcode either.
 //
+//  In that mode an in-app prompt also has to see the same enrolled faces or
+//  fingers the vault was opened under (5.1.1, M-3). A new enrolment makes it
+//  throw `.unavailable`, and the caller asks for the app password instead.
+//
 
 import Foundation
 import LocalAuthentication
@@ -130,13 +134,126 @@ public enum BiometricGate {
         recentLock.lock()
         recent?.context.invalidate()
         recent = nil
+        lastOwnerCheck = nil
         recentLock.unlock()
     }
 
     private nonisolated static func remember(_ context: LAContext) {
         recentLock.lock()
-        recent = (context, MonotonicClock.millis())
+        let now = MonotonicClock.millis()
+        recent = (context, now)
+        lastOwnerCheck = now
         recentLock.unlock()
+    }
+
+    // MARK: - Enrolment the vault was opened under (5.1.1, M-3)
+    //
+    // The Face ID only Keychain item is tied to what was enrolled when it was
+    // written, so a new face can't open the vault at the lock screen. An in-app
+    // prompt evaluates a fresh context, which any face enrolled now passes. So
+    // the biometric state is kept when the vault opens in that mode (or the item
+    // is written again), and each in-app prompt is compared against it. Lock
+    // clears it. Only the opaque state hash is kept, never a context.
+
+    private nonisolated(unsafe) static var unlockEnrolment: Data?
+    private nonisolated(unsafe) static var enrolmentChangeSeen = false
+
+    /// How an in-app prompt's enrolment compares with the one kept at unlock.
+    nonisolated enum EnrolmentCheck: Equatable {
+        case unchanged
+        /// Something was enrolled or removed since the vault opened.
+        case changed
+        /// Nothing kept, or nothing to compare: not a pass.
+        case unknown
+    }
+
+    /// The comparison itself. Only `.unchanged` lets a prompt pass.
+    nonisolated static func compareEnrolment(recorded: Data?, current: Data?) -> EnrolmentCheck {
+        guard let recorded, let current, !recorded.isEmpty, !current.isEmpty else { return .unknown }
+        return recorded == current ? .unchanged : .changed
+    }
+
+    /// The enrolment state `context` saw. Set once the context has evaluated a
+    /// biometric policy, or `canEvaluatePolicy` succeeded for one.
+    nonisolated static func enrolmentState(of context: LAContext) -> Data? {
+        if #available(iOS 18.0, *) {
+            return context.domainState.biometry.stateHash
+        }
+        return context.evaluatedPolicyDomainState
+    }
+
+    /// Keep `state` as the enrolment the vault was opened under.
+    nonisolated static func recordUnlockEnrolment(_ state: Data?) {
+        recentLock.lock()
+        unlockEnrolment = state
+        enrolmentChangeSeen = false
+        recentLock.unlock()
+    }
+
+    /// Keep what is enrolled right now, for when the Face ID only item has just
+    /// been written again (it binds the same set).
+    nonisolated static func recordCurrentEnrolment() {
+        let ctx = LAContext()
+        var err: NSError?
+        let state = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err)
+            ? enrolmentState(of: ctx) : nil
+        recordUnlockEnrolment(state)
+    }
+
+    /// Drop the kept enrolment (on lock).
+    nonisolated static func forgetUnlockEnrolment() {
+        recordUnlockEnrolment(nil)
+    }
+
+    nonisolated static func recordedEnrolment() -> Data? {
+        recentLock.lock()
+        defer { recentLock.unlock() }
+        return unlockEnrolment
+    }
+
+    private nonisolated static func noteEnrolmentChange() {
+        recentLock.lock()
+        enrolmentChangeSeen = true
+        recentLock.unlock()
+    }
+
+    /// Whether the last in-app prompt failed because the enrolment changed.
+    /// Reading it clears it, so the note shows once per prompt.
+    nonisolated static func takeEnrolmentChangeNotice() -> Bool {
+        recentLock.lock()
+        defer { recentLock.unlock() }
+        let seen = enrolmentChangeSeen
+        enrolmentChangeSeen = false
+        return seen
+    }
+
+    /// What the app password sheet says after a changed enrolment, worded like
+    /// the lock screen's.
+    static func enrolmentChangedText(noun: String) -> String {
+        let name = biometryName()
+        let changed = String(localized: "\(name) changed on this iPhone, so AgePony asks for your \(noun) here instead. After you next unlock the vault with your \(noun), \(name) works again.")
+        let check = name == "Touch ID"
+            ? String(localized: "If you didn't change \(name) yourself, check Settings > \(name) & Passcode for a fingerprint you didn't add before you enter your \(noun).")
+            : String(localized: "If you didn't change \(name) yourself, check Settings > \(name) & Passcode for an appearance you didn't add before you enter your \(noun).")
+        return changed + " " + check
+    }
+
+    // MARK: - Owner check window (5.1.1, H-1)
+    //
+    // Setting the first app password needs a Face ID or passcode check first.
+    // Typing and confirming a password can take longer than the 30 second
+    // context lifetime above, so the time of the last successful in-app prompt
+    // is kept separately. It is only a time, never a context, and lock clears it.
+
+    private nonisolated(unsafe) static var lastOwnerCheck: UInt64?
+
+    /// Whether an in-app Face ID or passcode prompt succeeded within `window`.
+    public nonisolated static func ownerConfirmed(withinMillis window: UInt64) -> Bool {
+        recentLock.lock()
+        defer { recentLock.unlock() }
+        guard let at = lastOwnerCheck else { return false }
+        let now = MonotonicClock.millis()
+        return now >= at && now - at <= window
     }
 
     /// Whether this device has a passcode (5.0.1, plan 2.8). Without one, iOS
@@ -196,7 +313,14 @@ public enum BiometricGate {
     /// `remember: false` keeps the context out of `recentContext()`. The lock
     /// screen passes it: the default lock never shared its unlock prompt with
     /// Secure Enclave keys, and Face ID only doesn't either.
-    public static func biometricOnlyContext(reason: String, remember keep: Bool = true) async throws -> LAContext {
+    ///
+    /// `checkEnrolment` (5.1.1, M-3): an in-app prompt passes only when the
+    /// enrolment matches the one kept at unlock; otherwise it throws
+    /// `.unavailable`. The lock screen passes false: the Keychain item does that
+    /// check there.
+    public static func biometricOnlyContext(reason: String, remember keep: Bool = true,
+                                            checkEnrolment: Bool = true) async throws -> LAContext {
+        if checkEnrolment { _ = takeEnrolmentChangeNotice() }
         let ctx = LAContext()
         // An empty title hides the fallback button, so the sheet offers no way
         // to the passcode.
@@ -207,10 +331,35 @@ public enum BiometricGate {
         guard ctx.canEvaluatePolicy(policy, error: &err) else {
             throw BiometricGateError.unavailable
         }
+        // Nothing recorded at unlock (the item rewrite failed, say): no Face ID
+        // prompt could count, so go straight to the password (5.1.1, M-3).
+        if checkEnrolment, recordedEnrolment() == nil {
+            ctx.invalidate()
+            throw BiometricGateError.unavailable
+        }
+        // Known to have changed already: go straight to the password instead of
+        // a Face ID prompt that can't count (5.1.1, M-3).
+        if checkEnrolment,
+           compareEnrolment(recorded: recordedEnrolment(), current: enrolmentState(of: ctx)) == .changed {
+            ctx.invalidate()
+            noteEnrolmentChange()
+            throw BiometricGateError.unavailable
+        }
         let failure = String(localized: "\(name) didn't confirm it's you.")
         do {
             let ok = try await ctx.evaluatePolicy(policy, localizedReason: reason)
             if !ok { throw BiometricGateError.failed(failure) }
+            // Checked again on what the prompt itself saw; only this one counts.
+            if checkEnrolment {
+                let check = compareEnrolment(recorded: recordedEnrolment(), current: enrolmentState(of: ctx))
+                guard check == .unchanged else {
+                    // A face or finger the vault wasn't opened under: never hand
+                    // this context on (5.1.1, M-3).
+                    ctx.invalidate()
+                    if check == .changed { noteEnrolmentChange() }
+                    throw BiometricGateError.unavailable
+                }
+            }
             if keep { remember(ctx) }
             return ctx
         } catch let gateError as BiometricGateError {

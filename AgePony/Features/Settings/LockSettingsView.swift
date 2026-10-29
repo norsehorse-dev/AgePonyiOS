@@ -127,8 +127,11 @@ struct LockSettingsView: View {
                 }
             } else {
                 Button("Set a password or PIN") {
-                    biometricOnlyAfterPassword = true
-                    showSetPassword = true
+                    // The first password is a new way in: the owner first (5.1.1, H-1).
+                    requireOwner {
+                        biometricOnlyAfterPassword = true
+                        showSetPassword = true
+                    }
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -279,7 +282,9 @@ struct LockSettingsView: View {
     private var passwordSection: some View {
         Section {
             if !hasPassword {
-                Button("Set a password or PIN…") { showSetPassword = true }
+                // The first password is a new way in, so it needs the owner, not
+                // just whoever holds the unlocked app (5.1.1, H-1).
+                Button("Set a password or PIN…") { requireOwner { showSetPassword = true } }
             } else {
                 Text("Unlock \(secretNoun) is set.")
                     .foregroundStyle(.secondary)
@@ -433,7 +438,13 @@ struct LockSettingsView: View {
                 try await BiometricGate.authenticate(reason: String(localized: "Confirm it's you to change how AgePony locks"))
                 action()
             } catch BiometricGateError.unavailable {
-                action()
+                // Only a phone with no passcode has nothing to check. Anything
+                // else that stops the prompt is not a pass (5.1.1, H-1).
+                if BiometricGate.devicePasscodeIsSet() {
+                    errorMessage = String(localized: "Face ID and the passcode aren't available right now, so AgePony can't confirm it's you. Try again in a moment.")
+                } else {
+                    action()
+                }
             } catch BiometricGateError.userCancelled {
                 // Leave everything as it was.
             } catch {
@@ -470,6 +481,7 @@ struct LockSettingsView: View {
             case .weakSecret:             return UserMessage.text(for: e, fallback: String(localized: "That \(secretNoun) is too short."))
             case .kindLockedByDuress:     return String(localized: "Remove the duress \(secretNoun) first to switch between a password and a PIN.")
             case .lockModeLockedByDuress: return String(localized: "Remove the duress \(secretNoun) to use \(biometricWord).")
+            case .ownerCheckNeeded:       return UserMessage.text(for: e, fallback: String(localized: "Couldn't change the lock settings."))
             case .passwordIsOnlyUnlock:   return String(localized: "Your \(secretNoun) is the only way into the vault. Choose \(biometricWord) above before removing it.")
             case .noAppPassword:          return String(localized: "Set an app password first.")
             case .notUnlocked:            return String(localized: "Unlock the vault first.")

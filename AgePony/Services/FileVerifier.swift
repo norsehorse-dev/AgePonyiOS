@@ -162,6 +162,49 @@ public enum FileVerifier {
         recipients: [StoredRecipient],
         signers: [StoredSigner] = []
     ) -> FileVerificationResult? {
+        verify(stanza: stanza, identities: identities, recipients: recipients, signers: signers,
+               plaintextHash: { try FileSigner.digest(ofFileAt: plaintextURL, hash: $0) })
+    }
+
+    /// `verify(stanza:plaintextURL:...)` for plaintext held in memory, as Text
+    /// decrypt has it (5.1.1, L-1).
+    public static func verify(
+        stanza: SignatureStanza.Opening,
+        plaintext: Data,
+        identities: [StoredIdentity],
+        recipients: [StoredRecipient],
+        signers: [StoredSigner] = []
+    ) -> FileVerificationResult? {
+        verify(stanza: stanza, identities: identities, recipients: recipients, signers: signers,
+               plaintextHash: { $0.digest(plaintext) })
+    }
+
+    /// A signed bundle read whole, as Text decrypt has it (5.1.1, L-1). Same
+    /// namespace, message and v1 note as the streamed bundle.
+    public static func verify(
+        bundle: SignedBundle.Parsed,
+        identities: [StoredIdentity],
+        recipients: [StoredRecipient],
+        signers: [StoredSigner] = []
+    ) -> FileVerificationResult {
+        let message = bundle.signedMessage()
+        return verify(
+            signatureText: bundle.signatureArmored,
+            identities: identities,
+            recipients: recipients,
+            signers: signers,
+            namespace: bundle.namespace,
+            messageHash: { $0.digest(message) }
+        ).with(note: bundle.nameCovered ? nil : v1BundleNote)
+    }
+
+    private static func verify(
+        stanza: SignatureStanza.Opening,
+        identities: [StoredIdentity],
+        recipients: [StoredRecipient],
+        signers: [StoredSigner],
+        plaintextHash: (SSHSigHash) throws -> Data
+    ) -> FileVerificationResult? {
         switch stanza {
         case .absent:
             return nil
@@ -180,7 +223,7 @@ public enum FileVerifier {
                 signers: signers,
                 namespace: opened.namespace,
                 messageHash: { alg in
-                    try opened.messageDigest(alg) { try FileSigner.digest(ofFileAt: plaintextURL, hash: $0) }
+                    try opened.messageDigest(alg, plaintextHash: plaintextHash)
                 }
             ).with(note: opened.coversRecipients ? nil : v1StanzaNote)
         }

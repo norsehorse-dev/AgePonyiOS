@@ -35,19 +35,29 @@ struct TextEncryptView: View {
         _inputText = State(initialValue: preloadedText)
     }
 
+    private static let resultAnchor = "result"
+
     var body: some View {
-        Form {
-            inputSection
-            recipientsSection
-            if let result = resultArmored {
-                resultSection(armored: result)
-            } else {
-                encryptSection
-            }
-            if let errorMessage {
-                Section {
-                    StatusText(errorMessage)
+        ScrollViewReader { proxy in
+            Form {
+                inputSection
+                recipientsSection
+                if let result = resultArmored {
+                    resultSection(armored: result)
+                } else {
+                    encryptSection
                 }
+                if let errorMessage {
+                    Section {
+                        StatusText(errorMessage)
+                    }
+                }
+            }
+            // The result replaces the Encrypt button below the recipients, often
+            // off screen: bring it into view so Copy and Share are seen.
+            .onChange(of: resultArmored) { _, new in
+                guard new != nil else { return }
+                withAnimation { proxy.scrollTo(Self.resultAnchor, anchor: .top) }
             }
         }
         .textCase(nil)
@@ -153,6 +163,7 @@ struct TextEncryptView: View {
             } footer: {
                 Text("PEM-style armor. Safe to paste anywhere that handles text. The recipient runs Decrypt text with their identity or passphrase.")
             }
+            .id(Self.resultAnchor)
 
             Section {
                 Button {
@@ -178,7 +189,10 @@ struct TextEncryptView: View {
                 .buttonStyle(.agePonySecondary)
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
+            }
 
+            // Its own section, as on the other done screens.
+            Section {
                 Button("Encrypt another") {
                     inputText = ""
                     resultArmored = nil

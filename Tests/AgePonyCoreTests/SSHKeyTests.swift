@@ -111,9 +111,9 @@ final class SSHKeyTests: XCTestCase {
 
     func testParseSSHPublicKey_multiWordComment() throws {
         let pub = Data(repeating: 0x77, count: 32)
-        let line = Self.makeSSHPublicKeyLine(pub: pub, comment: "Kevin's Laptop 2026")
+        let line = Self.makeSSHPublicKeyLine(pub: pub, comment: "Pony's work laptop 2026")
         let parsed = try SSHKey.parsePublicKey(line)
-        XCTAssertEqual(parsed.comment, "Kevin's Laptop 2026")
+        XCTAssertEqual(parsed.comment, "Pony's work laptop 2026")
     }
 
     func testParseSSHPublicKey_rejectsMalformed() {

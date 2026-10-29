@@ -51,6 +51,9 @@ struct PassphraseModeView: View {
     @State private var picking = false
     @State private var copied = false
     @State private var usedShare: ClaimedShare?
+    /// Outlives the view, so a decrypt that finishes after Close or a lock can
+    /// tell, and delete what it wrote (5.1.1, M-2).
+    @State private var lifetime = FlowLifetime()
 
     var body: some View {
         NavigationStack {
@@ -124,7 +127,10 @@ struct PassphraseModeView: View {
                 resetResult()
             }
             .onAppear(perform: adoptShare)
-            .onDisappear(perform: cleanUp)
+            .onDisappear {
+                lifetime.gone = true
+                cleanUp()
+            }
         }
     }
 
@@ -169,9 +175,19 @@ struct PassphraseModeView: View {
     private var resultSection: some View {
         if let output {
             Section {
-                Text(output)
-                    .font(task == .encryptText ? AgePonyTypography.monoCaption : AgePonyTypography.body)
-                    .textSelection(.enabled)
+                if task == .encryptText {
+                    Text(output)
+                        .font(AgePonyTypography.monoCaption)
+                        .textSelection(.enabled)
+                } else {
+                    // Decrypted text can't be selected: the system Copy skips
+                    // local-only and expiry (5.1.1, L-14).
+                    Text(output)
+                        .font(AgePonyTypography.body)
+                }
+                if task == .decryptText, let signature {
+                    CompactVerifiedBadge(result: signature)
+                }
                 Button {
                     ClipboardPreferences.copy(output)
                     copied = true
@@ -190,7 +206,7 @@ struct PassphraseModeView: View {
                 if task == .encryptText {
                     Text("Encrypted")
                 } else {
-                    Text("Decrypted")
+                    Text(DecryptHeadline.text(for: signature))
                 }
             }
         }
@@ -205,7 +221,8 @@ struct PassphraseModeView: View {
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
             } header: {
-                Text("Decrypted")
+                // Says so when the signature failed (5.1.1, L-3).
+                Text(DecryptHeadline.text(for: signature))
             } footer: {
                 Text("Deleted from this iPhone when you close this screen.")
             }
@@ -263,6 +280,7 @@ struct PassphraseModeView: View {
     }
 
     private func close() {
+        lifetime.gone = true
         cleanUp()
         onClose()
     }
@@ -302,11 +320,18 @@ struct PassphraseModeView: View {
             }
             let binary = summary.binaryBytes ?? Data()
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = Result { () throws -> String in
-                    let plain = try Age.decrypt(ciphertext: binary, passphrase: pass)
-                    return String(data: plain, encoding: .utf8) ?? String(localized: "(Not text, \(plain.count) bytes)")
+                // Signed text is checked as in Text decrypt (5.1.1, L-1). With the
+                // vault locked there's nothing to say whose key it is.
+                let result = Result {
+                    try TextDecryptor.decrypt(binary: binary, identities: [], passphrase: pass,
+                                              storedIdentities: [], recipients: [], signers: [])
                 }
-                DispatchQueue.main.async { finish(result) { output = $0 } }
+                DispatchQueue.main.async {
+                    finish(result) { outcome in
+                        output = outcome.text
+                        signature = outcome.signature
+                    }
+                }
             }
         case .decryptFile:
             guard let url = fileURL else { working = false; return }
@@ -329,6 +354,12 @@ struct PassphraseModeView: View {
                     return (out.url, verdict)
                 }
                 DispatchQueue.main.async {
+                    // The screen closed while this ran: nothing will show or clean
+                    // up the file, so delete it now (5.1.1, M-2).
+                    if lifetime.gone {
+                        if case .success(let pair) = result { FileEncryptor.cleanupTempFile(at: pair.0) }
+                        return
+                    }
                     finish(result) { pair in
                         resultURL = pair.0
                         signature = pair.1
@@ -340,6 +371,8 @@ struct PassphraseModeView: View {
 
     private func finish<T>(_ result: Result<T, Error>, _ apply: (T) -> Void) {
         working = false
+        // Nothing lands on a screen that has gone (5.1.1, M-2).
+        guard !lifetime.gone else { return }
         switch result {
         case .success(let value): apply(value)
         case .failure(let error): message = describe(error)

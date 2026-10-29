@@ -152,12 +152,23 @@ public struct YubiKeyIdentity: HardwareIdentity {
     /// The uncompressed peer points the card would have to ECDH with to open a file
     /// with this header, in header order. Lets the app do the NFC exchange up front
     /// (asynchronously) and decrypt with a `RecordedKeyAgreement`.
+    ///
+    /// Only the first `Age.maxStanzasPerHardwareIdentity` matching stanzas count, the
+    /// same ones `Age.unwrapFileKey` tries, so one tap never runs more ECDHs than that
+    /// (5.1.1, L-7).
     public func peerPoints(in stanzas: [Stanza]) -> [Data] {
-        stanzas.compactMap { s -> Data? in
-            if let epk = piv.epk(of: s) { return try? P256Curve.uncompressed(epk) }
-            if tagged.matches(stanza: s), let enc = try? Stanza.base64Decode(s.args[1]) { return enc }
-            return nil
+        var points: [Data] = []
+        var matched = 0
+        for s in stanzas where matches(stanza: s) {
+            guard matched < Age.maxStanzasPerHardwareIdentity else { break }
+            matched += 1
+            if let epk = piv.epk(of: s) {
+                if let point = try? P256Curve.uncompressed(epk) { points.append(point) }
+            } else if let enc = try? Stanza.base64Decode(s.args[1]) {
+                points.append(enc)
+            }
         }
+        return points
     }
 }
 

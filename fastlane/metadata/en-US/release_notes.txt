@@ -1,22 +1,18 @@
-AgePony 5.1.0 fixes setup on iPhones with Face ID turned off and adds a Face ID only lock.
+AgePony 5.1.1 fixes the issues found in an internal security review of 5.1.0, and adds a Paste button to Decrypt text.
 
-New
-- Face ID only lock: the device passcode can no longer open the vault. If you've set an AgePony password, it still works when Face ID can't.
-- In Face ID only mode, a hardware key can also require Face ID on every use.
-- On iOS 26, new quantum-safe hardware keys keep both halves in the Secure Enclave, and the ML-KEM and X-Wing steps run on Apple's CryptoKit. Earlier iOS versions keep AgePony's own code, and existing keys keep working.
-- Hardware security keys ask for the PIN first, so a decrypt takes one tap.
-- Key pickers show each key's type and the start of the key, so two keys with similar names are easy to tell apart.
-
-Changed
-- A plainer design throughout, with error messages in plain words and a code where one helps.
-- AgePony is now tested against the 147 shared age test vectors.
+Security
+- Setting your first app password now asks for Face ID or your passcode first.
+- ssh-ed25519 keys that can't be encrypted to safely are refused.
+- Decrypted copies are removed when AgePony starts and when it locks, so a force-quit no longer leaves one behind.
+- In Face ID only mode, if a face is added in Settings, AgePony asks for your app password before using your keys.
+- With No lock and an app password, decrypting, signing and showing a key now ask for the app password instead of the device passcode.
+- A hardware key that stops working no longer hides a YubiKey the file is also encrypted to.
+- A file can't make AgePony retry a hardware key over and over, and a PIN is never sent twice after the key loses contact.
 
 Fixed
-- Setup no longer stops with "Keychain refused the request" on iPhones that have a passcode but Face ID turned off. If iOS won't protect the vault with Face ID or the passcode, setup offers an AgePony password instead.
-- A vault set up with only the passcode moves to Face ID once Face ID is turned on.
-- Post-quantum keys now refuse a malformed key share that the test vectors turned up.
-- A file that finished decrypting after you closed the screen is no longer left behind.
-
-The 5.0.1 notes called the September review a full security audit. It was an internal security review, not an independent audit. The full report is published in the AgePony source repository.
+- Decrypt text now checks signatures and shows who signed.
+- A signature that fails to verify is shown in red, with "Decrypted, signature failed" on files.
+- Very large passphrase settings in a file get a clear message instead of a crash.
+- Encrypt text scrolls to the result, and the buttons at the bottom of both text screens line up.
 
 Everything still runs on your device. No tracking, no ads.

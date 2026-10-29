@@ -31,27 +31,55 @@ enum AgePonyIntentError: Error, LocalizedError {
 @available(iOS 16.0, *)
 enum AgePonyIntentSupport {
 
-    /// Write an incoming IntentFile's bytes to a fresh temp file and return its
-    /// URL. The original filename is preserved so the output is named sensibly
-    /// (e.g. report.pdf -> report.pdf.age).
-    static func stageInput(_ file: IntentFile) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AgePonyIntent-\(UUID().uuidString.prefix(8))", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    static let stagingPrefix = "AgePonyIntent-"
 
-        let name = file.filename.isEmpty ? "input" : file.filename
-        let url = dir.appendingPathComponent(name)
-        do {
-            try file.data.write(to: url, options: [.atomic])
-        } catch {
-            throw AgePonyIntentError.couldNotReadInput
-        }
-        return url
+    /// An incoming file written to its own temp folder. `cleanup` removes that
+    /// folder and nothing else.
+    struct Staged {
+        let folder: URL
+        let input: URL
     }
 
-    /// Remove the temp directory created by `stageInput`.
-    static func cleanup(_ url: URL) {
-        let dir = url.deletingLastPathComponent()
-        try? FileManager.default.removeItem(at: dir)
+    /// The name to stage an incoming file under: its last path component only,
+    /// with nothing a path resolver could use (5.1.1, M-5). The original name is
+    /// kept otherwise, so the output is named sensibly (report.pdf -> report.pdf.age).
+    static func safeName(_ raw: String) -> String {
+        raw.isEmpty ? "input" : SharedContainer.sanitizedFilename(raw)
+    }
+
+    /// Write an incoming IntentFile's bytes to a fresh temp folder.
+    static func stageInput(_ file: IntentFile) throws -> Staged {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(stagingPrefix + String(UUID().uuidString.prefix(8)), isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let url = folder.appendingPathComponent(safeName(file.filename), isDirectory: false)
+        // Belt and braces: the joined path must still sit directly in the folder.
+        // Not standardized: the file doesn't exist yet, and standardizing only
+        // drops /private from paths that exist, so the two would never match.
+        guard url.deletingLastPathComponent().path == folder.path else {
+            try? FileManager.default.removeItem(at: folder)
+            throw AgePonyIntentError.couldNotReadInput
+        }
+        do {
+            try file.data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw AgePonyIntentError.couldNotReadInput
+        }
+        return Staged(folder: folder, input: url)
+    }
+
+    /// Remove the folder `stageInput` made. Never a path derived from the file
+    /// name (5.1.1, M-5): only a folder directly in tmp whose name we gave it.
+    static func cleanup(_ staged: Staged) {
+        removeTempFolder(staged.folder, prefix: stagingPrefix)
+    }
+
+    static func removeTempFolder(_ folder: URL, prefix: String) {
+        let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        let f = folder.standardizedFileURL
+        guard f.deletingLastPathComponent().path == tmp, f.lastPathComponent.hasPrefix(prefix) else { return }
+        try? FileManager.default.removeItem(at: f)
     }
 }

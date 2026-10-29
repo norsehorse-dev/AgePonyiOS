@@ -13,6 +13,10 @@
 //  (decrypt, re-encrypt, sign, reveal). In Face ID only mode, when Face ID can't run
 //  (nothing enrolled, locked out) it asks for the app password; the passcode stays closed.
 //
+//  5.1.1: `authenticate` follows `confirm`'s rule, so a password-only vault asks for
+//  the app password, never the passcode (L-11). In Face ID only mode, a face or finger
+//  enrolled since the vault opened also goes to the app password, with a note (M-3).
+//
 
 import SwiftUI
 import UIKit
@@ -26,6 +30,8 @@ final class OwnerCheck {
     struct Pending: Identifiable {
         let id = UUID()
         let title: String
+        /// Shown above the title, for why the password is asked (5.1.1, M-3).
+        var note: String? = nil
         let run: () -> Void
     }
 
@@ -41,19 +47,33 @@ final class OwnerCheck {
     /// run. Throws what `BiometricGate.authenticate` throws; closing the password
     /// sheet throws `userCancelled`.
     func authenticate(_ vault: Vault, reason: String) async throws {
+        // The same rule as `confirm` (5.1.1, L-11): when the password is the only
+        // way in, the passcode doesn't stand in for it here either.
+        if vault.passwordIsOnlyUnlock {
+            guard await askPassword(title: reason, note: nil) else { throw BiometricGateError.userCancelled }
+            return
+        }
         do {
             try await BiometricGate.authenticate(reason: reason)
         } catch BiometricGateError.unavailable {
             guard BiometricGate.biometryOnly, vault.hasAppPassword else { throw BiometricGateError.unavailable }
-            guard await askPassword(title: reason) else { throw BiometricGateError.userCancelled }
+            guard await askPassword(title: reason, note: Self.enrolmentNote(vault)) else {
+                throw BiometricGateError.userCancelled
+            }
         }
     }
 
-    private func askPassword(title: String) async -> Bool {
+    /// The "Face ID changed" note when the prompt just failed for that (5.1.1, M-3).
+    private static func enrolmentNote(_ vault: Vault) -> String? {
+        guard BiometricGate.takeEnrolmentChangeNotice() else { return nil }
+        return BiometricGate.enrolmentChangedText(noun: (vault.unlockSecretKind ?? .password).displayNoun)
+    }
+
+    private func askPassword(title: String, note: String?) async -> Bool {
         finishWaiting(false)
         return await withCheckedContinuation { continuation in
             waiting = continuation
-            pending = Pending(title: title, run: { [weak self] in self?.finishWaiting(true) })
+            pending = Pending(title: title, note: note, run: { [weak self] in self?.finishWaiting(true) })
         }
     }
 
@@ -76,7 +96,7 @@ final class OwnerCheck {
                 run()
             } catch BiometricGateError.unavailable {
                 if vault.hasAppPassword {
-                    pending = Pending(title: title, run: run)
+                    pending = Pending(title: title, note: Self.enrolmentNote(vault), run: run)
                 } else {
                     run()
                 }
@@ -105,7 +125,7 @@ private struct OwnerCheckModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .sheet(item: $check.pending, onDismiss: { check.finishWaiting(false) }) { pending in
-                OwnerPasswordSheet(vault: vault, title: pending.title) {
+                OwnerPasswordSheet(vault: vault, title: pending.title, note: pending.note) {
                     check.pending = nil
                     pending.run()
                 }
@@ -125,6 +145,7 @@ private struct OwnerCheckModifier: ViewModifier {
 private struct OwnerPasswordSheet: View {
     let vault: Vault
     let title: String
+    let note: String?
     let onSuccess: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -150,6 +171,12 @@ private struct OwnerPasswordSheet: View {
                     .onSubmit(check)
                 } footer: {
                     if let message { StatusText(message) }
+                    else if let note {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(note)
+                            Text(title)
+                        }
+                    }
                     else { Text(title) }
                 }
             }

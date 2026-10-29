@@ -59,6 +59,10 @@ public enum Age {
     /// Size of the symmetric file key (per age v1 spec).
     public static let fileKeySize = 16
 
+    /// Most stanzas addressed to one hardware key that a decrypt will try (5.1.1, L-7).
+    /// A valid file has one per recipient; more than this is a crafted header.
+    public static let maxStanzasPerHardwareIdentity = 4
+
     /// Encrypt `plaintext` to one or more recipients.
     /// Recipients may be a mix of X25519 / SSH types; scrypt recipients MUST
     /// appear alone (mixing scrypt with any other recipient is a spec violation).
@@ -166,9 +170,13 @@ public enum Age {
     /// key. Hardware identities go last, and an error from one (a cancelled prompt, a key
     /// the OS invalidated) is held back while the rest are tried; it only surfaces if
     /// nothing else opened the file. Mirrors Android `Age.unwrapFileKey`.
+    ///
+    /// Each hardware identity is bounded (5.1.1, L-7): once it throws it is not asked
+    /// again for this file, and it is asked to open at most
+    /// `maxStanzasPerHardwareIdentity` of the stanzas addressed to it.
     static func unwrapFileKey(stanzas: [Stanza], identities: [AgeIdentity]) throws -> Data {
         try requireScryptAlone(stanzas: stanzas, identities: identities)
-        let hardware = identities.filter { $0 is HardwareIdentity }
+        let hardware: [any HardwareIdentity] = identities.compactMap { $0 as? HardwareIdentity }
         let software = identities.filter { !($0 is HardwareIdentity) }
         for stanza in stanzas {
             for id in software {
@@ -176,13 +184,23 @@ public enum Age {
             }
         }
         var firstError: Error?
+        var tries = [Int](repeating: 0, count: hardware.count)
+        var failed = [Bool](repeating: false, count: hardware.count)
         for stanza in stanzas {
-            for id in hardware {
+            for (i, id) in hardware.enumerated() where !failed[i] {
+                if id.matches(stanza: stanza) {
+                    // A matching tag can be made from the public key, so a crafted header
+                    // can address any number of stanzas to one key (5.1.1, L-7).
+                    guard tries[i] < maxStanzasPerHardwareIdentity else { continue }
+                    tries[i] += 1
+                }
                 let key: Data?
                 do {
                     key = try id.unwrap(stanza: stanza)
                 } catch {
+                    // A cancelled prompt or a lost key: don't ask it again for this file (5.1.1, L-7).
                     if firstError == nil { firstError = error }
+                    failed[i] = true
                     continue
                 }
                 if let key { return try checkFileKey(key) }

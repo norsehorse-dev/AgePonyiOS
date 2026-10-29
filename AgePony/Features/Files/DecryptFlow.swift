@@ -226,7 +226,8 @@ struct DecryptFlow: View {
     private var doneStage: some View {
         Form {
             Section {
-                StatusText("Decrypted", kind: .success, verdict: true)
+                // Says so when the signature failed (5.1.1, L-3).
+                DecryptHeadlineText(signature: signature)
                     .font(AgePonyTypography.headline)
                 if let url = resultURL {
                     LabeledContent("File") {

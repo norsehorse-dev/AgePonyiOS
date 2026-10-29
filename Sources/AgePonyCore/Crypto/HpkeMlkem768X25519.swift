@@ -103,19 +103,18 @@ public enum HpkeMlkem768X25519 {
 
     /// X25519 Diffie-Hellman.
     ///
-    /// One deliberate divergence from the reference implementation: CryptoKit
-    /// rejects a low-order peer public key by throwing, where filippo.io/hpke and
-    /// the `age` CLI would return the all-zero shared secret and carry on. This can
-    /// only be reached by encrypting to a hostile `age1pq1…` recipient whose
-    /// trailing 32 bytes are a small-order point — in which case refusing is the
-    /// better answer. On the decrypt side it is invisible: `HybridIdentity.unwrap`
-    /// catches and returns nil, which is already how "not for me" is signalled.
+    /// CryptoKit does not refuse a low-order peer public key: it returns an
+    /// all-zero shared secret. AgePony refuses that secret itself (5.1.0, found by
+    /// the CCTV vectors), with a constant-time check (5.1.1). Encrypting to a
+    /// hostile `age1pq1` recipient whose last 32 bytes are a small-order point
+    /// throws; on the decrypt side `HybridIdentity.unwrap` catches and returns nil,
+    /// which is already how "not for me" is signalled.
     static func x25519Exchange(privateKey: Data, peerPublicKey: Data) throws -> Data {
         let priv = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKey)
         let pub = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerPublicKey)
         let shared = try priv.sharedSecretFromKeyAgreement(with: pub)
         let bytes = shared.withUnsafeBytes { Data($0) }
-        guard bytes.contains(where: { $0 != 0 }) else { throw HybridKEMError.lowOrderPoint }
+        guard !X25519Identity.isAllZero(shared) else { throw HybridKEMError.lowOrderPoint }
         return bytes
     }
 

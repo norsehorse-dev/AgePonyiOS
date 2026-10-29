@@ -61,16 +61,14 @@ able to open the app. -25293 is errSecAuthFailed, returned by `SecItemAdd` in
 
 ### Cause on the device (to confirm)
 
-Confirmed by the reporter on Oct 26: passcode only, Face ID turned off (they turned it off before
-ever opening AgePony), and changing the passcode made no difference. With no biometrics available,
+Confirmed by a user report: passcode on, Face ID off. With no biometrics available,
 iOS refuses an item whose access control includes `.biometryCurrentSet`, even with
 `.or .devicePasscode`, because there is no current set to bind to. The ladder skips that step when
 `BiometricGate.availableBiometric()` reports none, so this phone starts at `.userPresence`. Device
 matrix case 2 (Face ID reset or turned off, passcode on) reproduces it.
 
-Closed Oct 26: the reporter's no-passcode attempt was on 4.0.1, which had no other path through
-setup, so it failed the same way. No second bug. The reporter also wrote the Oct 7 App Store review
-that plan 2.8 in the 5.0.1 plan worked from. Wants to hear when the update ships.
+Closed Oct 26: an earlier no-passcode attempt was on 4.0.1, which had no other path through
+setup, so it failed the same way. No second bug.
 
 ### Fix (done Oct 26, needs build and device pass)
 

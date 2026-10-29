@@ -131,10 +131,16 @@ public enum FileEncryptor {
         // us belongs to a batch, and removing it would take the siblings that
         // already succeeded -- so there, only the partial output goes.
         let ownsDirectory = (destinationDirectory == nil)
-        let outURL = try destinationDirectory.map { $0.appendingPathComponent(outputName) }
-            ?? freshTempURL(named: outputName)
+        let outURL: URL
+        if let destinationDirectory {
+            outURL = destinationDirectory.appendingPathComponent(outputName)
+            try createProtectedFile(at: outURL)
+        } else {
+            outURL = try freshProtectedOutput(named: outputName)
+        }
 
         guard let output = OutputStream(url: outURL, append: false) else {
+            if ownsDirectory { cleanupTempFile(at: outURL) } else { try? FileManager.default.removeItem(at: outURL) }
             throw FileEncryptorError.cannotOpenOutput(outURL.lastPathComponent)
         }
 
@@ -218,12 +224,24 @@ public enum FileEncryptor {
 
         let total = fileSize(of: inputURL)
         let armored = try looksArmored(inputURL)
-        let outURL = try freshTempURL(named: plaintextName(for: inputURL.lastPathComponent))
+        let usingPassphrase = (passphrase?.isEmpty == false)
+
+        // A crafted header can ask for more scrypt memory than iOS will give, which
+        // kills the app on every try. Refuse before deriving (5.1.1, L-2).
+        if usingPassphrase {
+            try checkScryptMemory(inputURL: inputURL, armored: armored) { ScryptMemory.fits(workFactor: $0) }
+        }
+
+        // The plaintext file exists with its protection class before the first
+        // byte is written (5.1.1, M-2).
+        let outURL = try freshProtectedOutput(named: plaintextName(for: inputURL.lastPathComponent))
 
         guard let rawInput = InputStream(url: inputURL) else {
+            cleanupTempFile(at: outURL)
             throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)
         }
         guard let output = OutputStream(url: outURL, append: false) else {
+            cleanupTempFile(at: outURL)
             throw FileEncryptorError.cannotOpenOutput(outURL.lastPathComponent)
         }
 
@@ -237,7 +255,7 @@ public enum FileEncryptor {
         let source: InputStream = armored ? ArmorDecodingSource(counted) : counted
         source.open()
 
-        let readers: [any AgeIdentity] = (passphrase?.isEmpty == false)
+        let readers: [any AgeIdentity] = usingPassphrase
             ? [ScryptIdentity(passphrase: passphrase ?? "")]
             : identities
 
@@ -382,8 +400,9 @@ public enum FileEncryptor {
         let scopedURLs = inputURLs.filter { $0.startAccessingSecurityScopedResource() }
         defer { scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() } }
 
-        let outURL = try freshTempURL(named: archiveName)
+        let outURL = try freshProtectedOutput(named: archiveName)
         guard let output = OutputStream(url: outURL, append: false) else {
+            cleanupTempFile(at: outURL)
             throw FileEncryptorError.cannotOpenOutput(archiveName)
         }
         output.open()
@@ -493,6 +512,9 @@ public enum FileEncryptor {
         outputBaseName: String,
         passphrase: String
     ) throws -> URL {
+        if let header = try? Age.parseHeader(ciphertext: binary) {
+            try checkScryptMemory(stanzas: header.stanzas) { ScryptMemory.fits(workFactor: $0) }
+        }
         let plaintext: Data
         do {
             plaintext = try Age.decrypt(ciphertext: binary, passphrase: passphrase)
@@ -600,6 +622,69 @@ public enum FileEncryptor {
             throw FileEncryptorError.writeFailed(UserMessage.text(for: error, fallback: String(localized: "Couldn't make a temporary folder for the output.")))
         }
         return dir.appendingPathComponent(name)
+    }
+
+    /// A fresh temp folder holding an empty output file that already has its
+    /// protection class, so a streamed write is never class C, even for a run that
+    /// is killed part way (5.1.1, M-2). The OutputStream opens it afterwards.
+    private static func freshProtectedOutput(named name: String) throws -> URL {
+        let url = try freshTempURL(named: name)
+        do {
+            try createProtectedFile(at: url)
+        } catch {
+            cleanupTempFile(at: url)
+            throw error
+        }
+        return url
+    }
+
+    /// Create an empty file at `url` with `.completeUnlessOpen` (Q4: an open file
+    /// keeps writing if the screen locks mid-decrypt).
+    private static func createProtectedFile(at url: URL) throws {
+        let made = FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.protectionKey: FileProtectionType.completeUnlessOpen]
+        )
+        guard made else {
+            throw FileEncryptorError.writeFailed(String(localized: "Couldn't write the output file."))
+        }
+    }
+
+    // MARK: - scrypt memory guard (5.1.1, L-2)
+
+    /// The message for a passphrase file whose work factor won't fit in memory.
+    /// Same sentence as passphrase mode.
+    static func scryptTooHeavyMessage(workFactor: Int) -> String {
+        String(localized: "Its passphrase work factor (\(ScryptMemory.describe(workFactor: workFactor))) needs more memory than iOS will give AgePony right now.")
+    }
+
+    /// Throw `scryptWontFit` when any scrypt stanza asks for a work factor `fits`
+    /// rejects. Reads the stanzas only; nothing is derived.
+    static func checkScryptMemory(stanzas: [Stanza], fits: (Int) -> Bool) throws {
+        for stanza in stanzas where stanza.type == "scrypt" && stanza.args.count == 2 {
+            // Read as AgePonyCore reads it: one or two digits, no leading zero.
+            let arg = stanza.args[1]
+            guard !arg.isEmpty, arg.count <= 2, arg.allSatisfy({ ("0"..."9").contains($0) }),
+                  !(arg.count > 1 && arg.hasPrefix("0")),
+                  let factor = Int(arg), factor > 0 else { continue }
+            if !fits(factor) {
+                throw FileEncryptorError.scryptWontFit(scryptTooHeavyMessage(workFactor: factor))
+            }
+        }
+    }
+
+    /// `checkScryptMemory(stanzas:fits:)` for a file on disk: reads only its
+    /// header. A header that doesn't parse is left for the decrypt to report.
+    static func checkScryptMemory(inputURL: URL, armored: Bool, fits: (Int) -> Bool) throws {
+        guard let raw = InputStream(url: inputURL) else { return }
+        raw.open()
+        defer { raw.close() }
+        let source: InputStream = armored ? ArmorDecodingSource(raw) : raw
+        source.open()
+        defer { source.close() }
+        guard let header = try? Age.parseHeaderStream(ciphertext: source) else { return }
+        try checkScryptMemory(stanzas: header.stanzas, fits: fits)
     }
 
     /// Apply the same data protection the buffered writer used to set via
@@ -738,7 +823,7 @@ extension FileEncryptor {
         let scoped = inputURL.startAccessingSecurityScopedResource()
         defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
 
-        let outURL = try freshTempURL(named: inputURL.lastPathComponent + ".age")
+        let outURL = try freshProtectedOutput(named: inputURL.lastPathComponent + ".age")
         guard let source = InputStream(url: inputURL) else {
             cleanupTempFile(at: outURL)
             throw FileEncryptorError.cannotOpenInput(inputURL.lastPathComponent)

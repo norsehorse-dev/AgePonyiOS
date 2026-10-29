@@ -265,7 +265,9 @@ The software CryptoKit path (S1 to S3) only needs a second conformer, a CryptoKi
   16-byte file key, the `postquantum` label rule. On encrypt, AgePony's FIPS 203 modulus check and
   low-order refusal run before CryptoKit unless S1e shows CryptoKit refuses both itself. On
   decrypt, if S1a shows CryptoKit opens the low-order vectors, the identity first runs its X25519
-  scalar against `ct_T` with `Curve25519.KeyAgreement` (which throws on low order) and returns nil.
+  scalar against `ct_T` with `Curve25519.KeyAgreement` and returns nil on an all-zero result.
+  (Corrected in 5.1.1: `Curve25519.KeyAgreement` does not throw on a low-order point; it returns
+  an all-zero secret, so the check has to be explicit. See the 5.1.1 plan, item 2.)
 - ML-KEM half of `mlkem768p256tag`: through the `MLKEMDecapsulation` protocol above, a CryptoKit
   `MLKEM768.PrivateKey` from the vault seed on 26, `MLKEM768.KeyPair` on 17 to 25. Encrypting to
   `age1tagpq1` recipients can use `CryptoKit.MLKEM768.PublicKey.encapsulate()` after AgePony's

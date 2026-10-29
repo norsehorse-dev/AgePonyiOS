@@ -12,7 +12,9 @@
 //      direction=encrypt + kind=text  → TextEncryptView(preloadedText:)
 //      direction=decrypt + kind=text  → TextDecryptView(preloadedText:)
 //
-//  On sheet dismiss the claimed file is deleted (M-7).
+//  On sheet dismiss the claimed file is deleted (M-7). SwiftUI clears the item
+//  before onDismiss runs, so the share on screen is also kept in `shownShare`
+//  and deleted from there (5.1.1, L-13).
 //
 
 import SwiftUI
@@ -86,10 +88,7 @@ struct HomeView: View {
                 pendingFileURL = url
             }
         }
-        .sheet(item: $presentedShare, onDismiss: {
-            presentedShare?.discard()
-            presentedShare = nil
-        }) { share in
+        .sheet(item: $presentedShare, onDismiss: discardDismissedShare) { share in
             NavigationStack {
                 ShareIncomingSheet(vault: vault, share: share)
             }
@@ -120,6 +119,17 @@ struct HomeView: View {
     }
 
     @State private var presentedShare: ClaimedShare?
+    /// The share the sheet was opened for. Still set when onDismiss runs, unlike
+    /// `presentedShare` (5.1.1, L-13).
+    @State private var shownShare: ClaimedShare?
+
+    /// Delete the share whose sheet just closed. When a new share replaced it,
+    /// `presentedShare` is already the new one, which stays.
+    private func discardDismissedShare() {
+        guard let shown = shownShare, shown.id != presentedShare?.id else { return }
+        shown.discard()
+        shownShare = presentedShare
+    }
 
     /// Move a pending share into the sheet. A share that arrives while another
     /// is on screen replaces it; the one it replaces is deleted.
@@ -132,6 +142,7 @@ struct HomeView: View {
         }
         if let current = presentedShare, current.id != share.id { current.discard() }
         presentedShare = share
+        shownShare = share
         pendingShare = nil
     }
 }

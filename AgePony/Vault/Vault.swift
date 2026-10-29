@@ -204,7 +204,10 @@ public final class Vault {
 
     public var hasCompletedOnboarding: Bool {
         get { UserDefaults.standard.bool(forKey: SettingsKey.hasCompletedOnboarding) }
-        set { UserDefaults.standard.set(newValue, forKey: SettingsKey.hasCompletedOnboarding) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: SettingsKey.hasCompletedOnboarding)
+            if newValue { createdThisRun = false }
+        }
     }
 
     /// Whether the user has seen (or skipped) the feature walkthrough — the
@@ -219,6 +222,12 @@ public final class Vault {
     // MARK: - Private
 
     private var masterKey: SymmetricKey?
+
+    /// True from `bootstrap` until onboarding finishes or the vault locks: the
+    /// vault is new and empty, so setup may set the first password without an
+    /// owner check (5.1.1, H-1). Only creating a vault sets it, which needs the
+    /// old one gone, so holding an unlocked app doesn't give it.
+    private var createdThisRun = false
 
     /// Passphrase held in memory for a run of passphrase encrypts, dropped when
     /// the vault locks. Never written to disk (3.2.0 ergonomics).
@@ -311,6 +320,7 @@ public final class Vault {
         self.trashedRecipients = []
         try persist()
         self.isUnlocked = true
+        createdThisRun = true
     }
 
     /// Unlock an existing vault. Triggers a biometric prompt via the OS.
@@ -369,12 +379,18 @@ public final class Vault {
     private func loadBiometryOnlyKey(prompt: String) async throws -> Data {
         if !KeychainStore.storedIsBiometryOnly { throw KeychainError.notFound }
         // Not kept for Secure Enclave keys, as with the default lock's prompt.
-        let context = try await BiometricGate.biometricOnlyContext(reason: prompt, remember: false)
+        // No enrolment check here: the Keychain item does it.
+        let context = try await BiometricGate.biometricOnlyContext(reason: prompt, remember: false,
+                                                                   checkEnrolment: false)
         // Anything beyond the biometry just evaluated fails with
         // errSecInteractionNotAllowed instead of showing passcode UI.
         context.interactionNotAllowed = true
         do {
-            return try KeychainStore.loadMasterKey(prompt: prompt, context: context)
+            let key = try KeychainStore.loadMasterKey(prompt: prompt, context: context)
+            // The item opened, so this is the enrolment it was written under: the
+            // in-app prompts are held to it until lock (5.1.1, M-3).
+            BiometricGate.recordUnlockEnrolment(BiometricGate.enrolmentState(of: context))
+            return key
         } catch KeychainError.notFound {
             throw KeychainError.biometryChanged
         } catch KeychainError.unhandled(let status)
@@ -385,7 +401,9 @@ public final class Vault {
 
     /// Drop the master key from memory. Called when the app enters background.
     public func lock() {
+        createdThisRun = false
         BiometricGate.forgetRecentContext()
+        BiometricGate.forgetUnlockEnrolment()
         TempFileCleanup.sweepKeyFiles()
         masterKey = nil
         identities = []
@@ -666,6 +684,15 @@ public final class Vault {
     /// secret is set (the decoy is typed on the same keyboard).
     public func setAppPassword(_ secret: String, kind: UnlockSecretKind) async throws {
         guard let key = masterKey else { throw VaultError.notUnlocked }
+        // The first password is a new way into the vault, and every owner check
+        // after it trusts the password (5.1.1, H-1). Unless setup is creating this
+        // vault right now, accept it only within a few minutes of a Face ID or
+        // passcode check, so a caller that forgets `requireOwner` fails here. A
+        // phone with no passcode has nothing to check.
+        if !hasAppPassword, !createdThisRun, BiometricGate.devicePasscodeIsSet(),
+           !BiometricGate.ownerConfirmed(withinMillis: 3 * 60_000) {
+            throw VaultError.ownerCheckNeeded
+        }
         if let problem = PasswordKeyBlob.policyError(secret: secret, isPIN: kind == .pin) {
             throw VaultError.weakSecret(problem)
         }
@@ -778,6 +805,9 @@ public final class Vault {
             let bytes = key.withUnsafeBytes { Data($0) }
             if lockMode == .biometricOnly {
                 try KeychainStore.storeBiometryOnlyMasterKey(bytes)
+                // The new item binds what is enrolled now; hold the in-app
+                // prompts to the same set (5.1.1, M-3).
+                BiometricGate.recordCurrentEnrolment()
             } else {
                 try KeychainStore.storeMasterKey(bytes, biometric: lockMode.requiresBiometricACL)
             }
@@ -1035,4 +1065,6 @@ public enum VaultError: Error, Equatable {
     case kindLockedByDuress
     case lockModeLockedByDuress
     case passwordIsOnlyUnlock
+    /// Setting the first app password needs a Face ID or passcode check first (5.1.1, H-1).
+    case ownerCheckNeeded
 }

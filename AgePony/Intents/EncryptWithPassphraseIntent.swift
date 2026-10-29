@@ -50,16 +50,19 @@ struct EncryptWithPassphraseIntent: AppIntent {
         }
 
         // Stage the incoming bytes to a temp file FileEncryptor can read.
-        let inputURL = try AgePonyIntentSupport.stageInput(file)
-        defer { AgePonyIntentSupport.cleanup(inputURL) }
+        let staged = try AgePonyIntentSupport.stageInput(file)
+        defer { AgePonyIntentSupport.cleanup(staged) }
 
         let outURL: URL
         do {
             outURL = try FileEncryptor.encrypt(
-                inputURL: inputURL,
+                inputURL: staged.input,
                 recipients: [],
                 passphrase: trimmed,
-                armor: armor
+                armor: armor,
+                // The output lives in the staging folder, which the lock sweep
+                // leaves alone and `cleanup` removes (5.1.1, M-5 and M-2).
+                destinationDirectory: staged.folder
             )
         } catch {
             throw AgePonyIntentError.operationFailed(

@@ -109,6 +109,13 @@ extension SignatureTrust {
         }
     }
 
+    /// A failed signature: its one-line summary takes the red too, not just the
+    /// icon (5.1.1, L-3).
+    var isFailure: Bool {
+        if case .invalid = self { return true }
+        return false
+    }
+
     /// One line, for use beside something else rather than as the headline.
     var summaryLine: String {
         switch self {
@@ -134,7 +141,13 @@ struct CompactVerifiedBadge: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label {
-                Text(result.trust.summaryLine)
+                if result.trust.isFailure {
+                    Text(result.trust.summaryLine)
+                        .foregroundStyle(result.trust.tint)
+                        .fontWeight(.semibold)
+                } else {
+                    Text(result.trust.summaryLine)
+                }
             } icon: {
                 Image(systemName: result.trust.iconName)
                     .foregroundStyle(result.trust.tint)
@@ -161,5 +174,33 @@ struct CompactVerifiedBadge: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Decrypt headline
+
+/// The headline over a decrypted result. A failed signature changes it, so a
+/// forged file never sits under a plain green "Decrypted" (5.1.1, L-3).
+enum DecryptHeadline {
+
+    static func text(for signature: FileVerificationResult?) -> String {
+        if signature?.trust.isFailure == true {
+            return String(localized: "Decrypted, signature failed")
+        }
+        return String(localized: "Decrypted")
+    }
+
+    static func kind(for signature: FileVerificationResult?) -> StatusText.Kind {
+        signature?.trust.isFailure == true ? .failure : .success
+    }
+}
+
+/// `DecryptHeadline` as a status line.
+struct DecryptHeadlineText: View {
+
+    let signature: FileVerificationResult?
+
+    var body: some View {
+        StatusText(DecryptHeadline.text(for: signature), kind: DecryptHeadline.kind(for: signature), verdict: true)
     }
 }

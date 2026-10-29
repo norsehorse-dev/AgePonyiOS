@@ -247,6 +247,8 @@ enum UserMessage {
             return String(localized: "Remove the duress password first to change how the vault unlocks.")
         case .passwordIsOnlyUnlock:
             return String(localized: "The app password is the only way into the vault. Choose another way to unlock before removing it.")
+        case .ownerCheckNeeded:
+            return String(localized: "Confirm it's you with Face ID or the passcode, then set the password or PIN again.")
         }
     }
 
@@ -608,6 +610,8 @@ enum UserMessage {
             return damagedSSHKey
         case .conversionFailed:
             return String(localized: "That Ed25519 key can't be converted for encryption.")
+        case .lowOrderPublicKey:
+            return String(localized: "That Ed25519 key isn't safe to encrypt to: anyone could open a file encrypted to it. Ask for the key again.")
         }
     }
 

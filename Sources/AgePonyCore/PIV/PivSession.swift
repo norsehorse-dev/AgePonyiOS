@@ -53,12 +53,13 @@ public enum PivSession {
     /// Run one ECDH per point in the stub's slot and return the shared x-coordinates
     /// keyed by point, for a `RecordedKeyAgreement`. With `pin`, the PIN is verified
     /// first; without it, a slot whose PIN policy wants one throws `.pinRequired`
-    /// and the app asks for it and taps again.
+    /// and the app asks for it and taps again. At most `Age.maxStanzasPerHardwareIdentity`
+    /// points are used, matching `YubiKeyIdentity.peerPoints` (5.1.1, L-7).
     public static func keyAgreements(_ card: PivCard, stub: YubiKeyStub, points: [Data], pin: String?) throws -> [Data: Data] {
         try open(card, stub: stub)
         if let pin { try Piv.verifyPIN(card, pin: pin) }
         var results: [Data: Data] = [:]
-        for point in points where results[point] == nil {
+        for point in points.prefix(Age.maxStanzasPerHardwareIdentity) where results[point] == nil {
             results[point] = try Piv.ecdh(card, slot: stub.slot, peerUncompressed: point)
         }
         return results

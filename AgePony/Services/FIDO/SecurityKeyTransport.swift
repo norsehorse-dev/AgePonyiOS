@@ -25,6 +25,34 @@
 //
 
 import Foundation
+import AgePonyCore
+
+/// Which commands may be sent a second time after a transient NFC error (5.1.1, L-8).
+/// When the answer is lost, the key may still have run the command. Reading, selecting
+/// and ECDH are safe to repeat. A PIN check is not: a wrong PIN sent twice costs two
+/// tries, so the user is asked to hold the key again instead.
+nonisolated enum NFCResendPolicy {
+    /// PIV / ISO 7816 instructions that change no PIN state: SELECT, GET DATA,
+    /// GENERAL AUTHENTICATE, GET METADATA, GET SERIAL, and GET RESPONSE for a chained answer.
+    // GET RESPONSE (0xC0) is left out: if its answer is lost the card has already
+    // moved to the next chunk, so a resend would return the wrong one.
+    static let resendablePivINS: Set<UInt8> = [0xA4, 0xCB, 0x87, 0xF7, 0xF8]
+
+    /// Whether a raw APDU (CLA INS P1 P2 ...) may be resent. Anything not known to be
+    /// safe, VERIFY (0x20) included, is not.
+    static func mayResend(apdu: Data) -> Bool {
+        guard apdu.count >= 4 else { return false }
+        return resendablePivINS.contains(apdu[apdu.startIndex + 1])
+    }
+
+    /// Whether a CTAP2 request (command byte + CBOR) may be resent. Never for clientPIN,
+    /// which carries the PIN hash.
+    static func mayResend(ctapRequest: Data) -> Bool {
+        guard let command = ctapRequest.first else { return false }
+        return command != CTAP2.cmdClientPin
+    }
+}
+
 #if canImport(CoreNFC)
 import CoreNFC
 
@@ -46,6 +74,8 @@ public enum SecurityKeyError: Error, LocalizedError {
     case pinAgreementNotP256
     case cancelled
     case malformedCommand
+    /// The NFC link dropped during a command that isn't safe to resend (5.1.1, L-8).
+    case holdKeyAgain
 
     public var errorDescription: String? {
         switch self {
@@ -69,6 +99,8 @@ public enum SecurityKeyError: Error, LocalizedError {
             return String(localized: "Cancelled.")
         case .malformedCommand:
             return String(localized: "AgePony built a command the key can't take.")
+        case .holdKeyAgain:
+            return String(localized: "The key lost contact during the PIN check. Hold it to the top of your iPhone and try again.")
         }
     }
 
@@ -120,7 +152,8 @@ public final class SecurityKeyChannel {
     public func sendCTAP(_ request: Data) async throws -> Data {
         // NFCCTAP_MSG: 80 10 00 00 <request> Le(extended)
         var (data, sw1, sw2) = try await exchange(
-            ins: 0x10, data: request
+            ins: 0x10, data: request,
+            mayResend: NFCResendPolicy.mayResend(ctapRequest: request)
         )
 
         var polls = 0
@@ -128,7 +161,7 @@ public final class SecurityKeyChannel {
             polls += 1
             if polls > maxKeepalivePolls { throw SecurityKeyError.keepaliveTimedOut }
             // NFCCTAP_GETRESPONSE: 80 11 00 00 Le(extended), no data.
-            (data, sw1, sw2) = try await exchange(ins: 0x11, data: Data())
+            (data, sw1, sw2) = try await exchange(ins: 0x11, data: Data(), mayResend: true)
         }
 
         guard sw1 == 0x90 && sw2 == 0x00 else {
@@ -154,12 +187,14 @@ public final class SecurityKeyChannel {
     /// Send a raw APDU and wait for the answer: response data followed by SW1 SW2,
     /// as AgePonyCore's `PivCard` expects. Blocks the calling thread, so call it
     /// off the main thread and never on the NFC session's queue (the answer is
-    /// delivered there). Retries once on a transient transceive glitch.
+    /// delivered there). Retries once on a transient transceive glitch, but only for a
+    /// command that is safe to run twice; VERIFY never is (5.1.1, L-8).
     public func transmitBlocking(_ apdu: Data) throws -> Data {
         guard let command = NFCISO7816APDU(data: apdu) else { throw SecurityKeyError.malformedCommand }
         do {
             return try sendBlocking(command)
         } catch let e as NFCReaderError where SecurityKeyChannel.isTransientTransceiveError(e) {
+            guard NFCResendPolicy.mayResend(apdu: apdu) else { throw SecurityKeyError.holdKeyAgain }
             Thread.sleep(forTimeInterval: 0.06)
             return try sendBlocking(command)
         }
@@ -208,11 +243,13 @@ public final class SecurityKeyChannel {
     /// CoreNFC reports when a single transceive fails while the key is still in
     /// the field) very often succeeds immediately on a second attempt — common
     /// on the extra round-trips a PIN/UV operation adds. Non-transient errors
-    /// and bad status words propagate unchanged.
-    private func exchange(ins: UInt8, data: Data) async throws -> (Data, UInt8, UInt8) {
+    /// and bad status words propagate unchanged. With `mayResend` false (a clientPIN
+    /// request) there is no retry: the user holds the key again (5.1.1, L-8).
+    private func exchange(ins: UInt8, data: Data, mayResend: Bool) async throws -> (Data, UInt8, UInt8) {
         do {
             return try await transceive(ins: ins, data: data)
         } catch let e as NFCReaderError where SecurityKeyChannel.isTransientTransceiveError(e) {
+            guard mayResend else { throw SecurityKeyError.holdKeyAgain }
             // Let the field settle briefly, then try once more.
             try? await Task.sleep(nanoseconds: 60_000_000)
             return try await transceive(ins: ins, data: data)

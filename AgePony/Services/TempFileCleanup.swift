@@ -41,12 +41,43 @@ enum TempFileCleanup {
     /// backup PDF, 5.0.1). Run on lock, so a file the user never shared doesn't outlive
     /// the session.
     static func sweepKeyFiles() {
+        sweep(prefixes: ["AgePonyKeys-"])
+    }
+
+    /// Folders that can hold plaintext: decrypt output and FileSigner output
+    /// (`AgePonyShare-`), batch output, flattened packages, Shortcuts staging, and
+    /// exported signers (5.1.1, M-2).
+    static let sessionPrefixes = [
+        "AgePonyShare-",
+        "AgePonyBatch-",
+        "AgePonyFlatten-",
+        "AgePonyIntent-",
+        "AgePonySigners-",
+    ]
+
+    /// Remove the `sessionPrefixes` folders. Run at launch, for what a killed run
+    /// left behind, and on lock, once the screens that showed them have closed
+    /// (5.1.1, M-2). Shares in `IncomingShare` are left to SharedContainer.
+    ///
+    /// The lock sweep passes `includingIntents: false`: a Shortcut can run while
+    /// the app is in the background, and its own cleanup removes its folder.
+    static func sweepSessionFiles(includingIntents: Bool = true) {
+        sweep(prefixes: includingIntents ? sessionPrefixes : sessionPrefixes.filter { $0 != "AgePonyIntent-" })
+    }
+
+    /// Remove the items directly in `directory` (the app's tmp by default) whose
+    /// name starts with one of `prefixes`. Nothing else is touched.
+    static func sweep(prefixes: [String], in directory: URL? = nil) {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil) else {
+        let dir = directory ?? fm.temporaryDirectory
+        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return
         }
-        for url in items where url.lastPathComponent.hasPrefix("AgePonyKeys-") {
-            try? fm.removeItem(at: url)
+        for url in items {
+            let name = url.lastPathComponent
+            if prefixes.contains(where: { name.hasPrefix($0) }) {
+                try? fm.removeItem(at: url)
+            }
         }
     }
 }

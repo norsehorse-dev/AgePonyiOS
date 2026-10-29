@@ -129,8 +129,11 @@ struct RootView: View {
         .environment(vault)
         .preferredColorScheme((AppTheme(rawValue: themeRaw) ?? .system).colorScheme)
         .task {
-            // Leftovers from a previous run: claimed files, and staged payloads
-            // nobody came back for.
+            // Leftovers from a previous run: plaintext a run that was killed left in
+            // tmp (5.1.1, M-2), claimed files, and staged payloads nobody came back for.
+            // Not sweepAll: a share claimed as the app opens can already be in tmp.
+            TempFileCleanup.sweepSessionFiles()
+            TempFileCleanup.sweepKeyFiles()
             SharedContainer.removeClaimed()
             SharedContainer.sweepStale()
             #if DEBUG
@@ -387,6 +390,8 @@ struct RootView: View {
         showPassphraseMode = false
         SharedContainer.removeClaimed()
         SharedContainer.removeAll()
+        // Decrypted output goes with the screens that showed it (5.1.1, M-2).
+        TempFileCleanup.sweepSessionFiles(includingIntents: false)
     }
 
     /// Keep the app running for the grace period after it leaves the screen and
@@ -455,7 +460,7 @@ struct RootView: View {
                 return UserMessage.lockout(millis: millis)
             case .noAppPassword:      return String(localized: "No app password is set for this vault.")
             case .duressEqualsReal, .realEqualsDuress, .weakSecret, .kindLockedByDuress,
-                 .lockModeLockedByDuress, .passwordIsOnlyUnlock:
+                 .lockModeLockedByDuress, .passwordIsOnlyUnlock, .ownerCheckNeeded:
                 // Settings errors; they can't come from an unlock, but say what they are.
                 return UserMessage.text(for: e, fallback: String(localized: "Couldn't unlock the vault."))
             }

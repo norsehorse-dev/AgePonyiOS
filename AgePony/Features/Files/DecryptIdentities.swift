@@ -12,6 +12,11 @@
 //      nothing else can open it. That costs a tap (and the PIN when the key's
 //      policy wants it), done here before the synchronous decrypt.
 //
+//  A tag match on a Secure Enclave key no longer skips the tap (5.1.1, M-4).
+//  When the file is also addressed to one, that key is tried for real first; if
+//  it can't open the file (a key a Face ID change destroyed, a lockout, a
+//  cancelled prompt), the tap is offered instead of failing on the Enclave error.
+//
 //  The PIN comes before the tap (5.1.0 item 1). A key whose policy is required
 //  or not known yet gets the PIN prompt first and then one tap that runs VERIFY
 //  and the ECDHs; a key known to need no PIN gets one tap without it. What a tap
@@ -20,6 +25,7 @@
 //
 
 import SwiftUI
+import LocalAuthentication
 import AgePonyCore
 
 /// What the YubiKey PIN prompt gave back, for one decrypt only.
@@ -48,14 +54,40 @@ enum DecryptIdentities {
         let context = BiometricGate.recentContext()
         // Software keys first (plan 2.7, as Android): a file also encrypted to a
         // normal key opens with it, without touching the Secure Enclave.
-        let ordered = vault.identities.filter { !$0.isHardwareDecryptionKey }
-            + vault.identities.filter { $0.isHardwareDecryptionKey }
-        var identities: [any AgeIdentity] = ordered.compactMap {
+        let software = vault.identities.filter { !$0.isHardwareDecryptionKey }
+        let hardware = vault.identities.filter { $0.isHardwareDecryptionKey }
+        var identities: [any AgeIdentity] = (software + hardware).compactMap {
             try? $0.toAgeIdentity(authenticationContext: context)
         }
+        // Only software keys count here (5.1.1, M-4): a Secure Enclave key is
+        // counted on its tag alone, which says nothing about whether it still works.
         guard let need = YubiKeyDecrypt.need(stanzas: stanzas, identities: vault.identities, others: identities) else {
             return .ready(identities)
         }
+        // The file is addressed to an Enclave key too: try it before asking for the
+        // tap (5.1.1, M-4). Skipped on the call after the PIN prompt, which only
+        // comes once this has already failed.
+        if yubiKeyPIN == nil, enclaveIsAddressed(stanzas: stanzas, identities: identities) {
+            if context == nil {
+                // One context for the try and the decrypt, so a key that asks for
+                // Face ID each use asks once.
+                let shared = LAContext()
+                identities = (software + hardware).compactMap {
+                    try? $0.toAgeIdentity(authenticationContext: shared)
+                }
+            }
+            let tryIdentities = identities
+            let opened = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                // An Enclave operation can wait on a system prompt: keep it off the main thread.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    cont.resume(returning: DecryptIdentities.enclaveOpens(stanzas: stanzas, identities: tryIdentities))
+                }
+            }
+            if opened { return .ready(identities) }
+        }
+        // The tapped YubiKey opens the file, so leave the Enclave keys out: one that
+        // just failed would only fail or prompt again (5.1.1, M-4).
+        identities = identities.filter { !($0 is HardwareIdentity) }
         let policy = need.identity.yubiKeyPINPolicy
         let pin: String?
         switch yubiKeyPIN {
@@ -99,6 +131,39 @@ enum DecryptIdentities {
             if YubiKeyDecrypt.isCancelled(error) { return .cancelled }
             return .failed(YubiKeyDecrypt.message(for: error))
         }
+    }
+
+    /// Whether a Secure Enclave identity in `identities` is addressed by one of
+    /// `stanzas`, from its tag alone (5.1.1, M-4).
+    nonisolated static func enclaveIsAddressed(stanzas: [Stanza], identities: [any AgeIdentity]) -> Bool {
+        identities.contains { id in
+            guard let hw = id as? HardwareIdentity else { return false }
+            return stanzas.contains { hw.matches(stanza: $0) }
+        }
+    }
+
+    /// Whether a Secure Enclave identity actually opens one of `stanzas` (5.1.1,
+    /// M-4). Runs the Enclave, so it can prompt. Any error (a key destroyed by a
+    /// Face ID change, a lockout, a cancelled prompt) counts as "doesn't open", so
+    /// the caller offers the YubiKey tap instead.
+    /// Bounded like the decrypt (5.1.1, L-7): a key that throws isn't asked again,
+    /// and each key tries at most `Age.maxStanzasPerHardwareIdentity` stanzas.
+    nonisolated static func enclaveOpens(stanzas: [Stanza], identities: [any AgeIdentity]) -> Bool {
+        let hardware: [any HardwareIdentity] = identities.compactMap { $0 as? HardwareIdentity }
+        var tries = [Int](repeating: 0, count: hardware.count)
+        var failed = [Bool](repeating: false, count: hardware.count)
+        for stanza in stanzas {
+            for (i, hw) in hardware.enumerated() where !failed[i] && hw.matches(stanza: stanza) {
+                guard tries[i] < Age.maxStanzasPerHardwareIdentity else { continue }
+                tries[i] += 1
+                do {
+                    if let key = try hw.unwrap(stanza: stanza), key.count == Age.fileKeySize { return true }
+                } catch {
+                    failed[i] = true
+                }
+            }
+        }
+        return false
     }
 
     /// A YubiKey PIV PIN is 6 to 8 characters (bytes as sent to the key).
